@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Mindmill windmill (art/mindmill-logo.svg), in one colour for themed icons, placed in the adaptive icon's safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <group android:scaleX="1.18" android:scaleY="1.18" android:translateX="16.24" android:translateY="16.24">
+        <path android:fillColor="#FFFFFFFF" android:fillType="evenOdd" android:pathData="M6.4,32 a25.6,25.6 0 1,0 51.2,0 a25.6,25.6 0 1,0 -51.2,0 Z M9.2,32 a22.8,22.8 0 1,1 45.6,0 a22.8,22.8 0 1,1 -45.6,0 Z"/>
+        <path android:fillColor="#FFFFFFFF" android:pathData="M29.09,32L35.52,32L41.73,53.94A24,24 0,0 1,23.28,54.36Z"/>
+        <group android:translateX="32.21" android:translateY="29.39">
+            <group android:rotation="214.94"><path android:fillColor="#FFFFFFFF" android:pathData="M2.52,-1.12C3.5,-1.17 6.37,0.7 8.4,0.85C10.43,1 12.8,0.1 14.7,-0.22C16.6,-0.54 19.29,-2 19.8,-1.05C20.32,-0.1 18.64,4.16 17.79,5.49C16.94,6.83 16.26,6.76 14.7,6.96C13.14,7.16 10.43,7.65 8.4,6.68C6.37,5.71 3.5,2.42 2.52,1.12C1.54,-0.18 1.54,-1.08 2.52,-1.12Z"/></group>
+            <group android:rotation="303.64"><path android:fillColor="#FFFFFFFF" android:pathData="M2.52,-1.12C3.5,-1.17 6.37,0.7 8.4,0.85C10.43,1 12.8,0.1 14.7,-0.22C16.6,-0.54 19.29,-2 19.8,-1.05C20.32,-0.1 18.64,4.16 17.79,5.49C16.94,6.83 16.26,6.76 14.7,6.96C13.14,7.16 10.43,7.65 8.4,6.68C6.37,5.71 3.5,2.42 2.52,1.12C1.54,-0.18 1.54,-1.08 2.52,-1.12Z"/></group>
+            <group android:rotation="36.28"><path android:fillColor="#FFFFFFFF" android:pathData="M2.52,-1.12C3.5,-1.17 6.37,0.7 8.4,0.85C10.43,1 12.8,0.1 14.7,-0.22C16.6,-0.54 19.29,-2 19.8,-1.05C20.32,-0.1 18.64,4.16 17.79,5.49C16.94,6.83 16.26,6.76 14.7,6.96C13.14,7.16 10.43,7.65 8.4,6.68C6.37,5.71 3.5,2.42 2.52,1.12C1.54,-0.18 1.54,-1.08 2.52,-1.12Z"/></group>
+            <group android:rotation="124.26"><path android:fillColor="#FFFFFFFF" android:pathData="M2.52,-1.12C3.5,-1.17 6.37,0.7 8.4,0.85C10.43,1 12.8,0.1 14.7,-0.22C16.6,-0.54 19.29,-2 19.8,-1.05C20.32,-0.1 18.64,4.16 17.79,5.49C16.94,6.83 16.26,6.76 14.7,6.96C13.14,7.16 10.43,7.65 8.4,6.68C6.37,5.71 3.5,2.42 2.52,1.12C1.54,-0.18 1.54,-1.08 2.52,-1.12Z"/></group>
+        </group>
+    </group>
+</vector>
