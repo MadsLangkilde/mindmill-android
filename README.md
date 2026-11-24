@@ -1,7 +1,7 @@
 # Mindmill for Android
 
-The phone companion to [Mindmill](https://github.com/MadsLangkilde/MindMill) on the Mac. The Mac is the server; the phone talks to it over one TLS WebSocket on
-the same network or over Tailscale. The contract is [`docs/remote-api.md`](https://github.com/MadsLangkilde/MindMill/blob/main/docs/remote-api.md) in the [Mindmill repo](https://github.com/MadsLangkilde/MindMill).
+The phone companion to [Mindmill](https://github.com/MadsLangkilde/mindmill-macos) on the Mac. The Mac is the server; the phone talks to it over one TLS WebSocket on
+the same network or over Tailscale. The contract is [`docs/remote-api.md`](https://github.com/MadsLangkilde/mindmill-macos/blob/main/docs/remote-api.md) in the [Mindmill repo](https://github.com/MadsLangkilde/mindmill-macos).
 
 ## Build
 

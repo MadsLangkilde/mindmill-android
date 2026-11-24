@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Mindmill for Android: the phone companion to Mindmill on the Mac (Kotlin, Jetpack Compose, Material 3). The Mac is
-the server; the contract is `docs/remote-api.md` in the Mindmill repo (github.com/MadsLangkilde/MindMill; locally `~/projects/claude_plugins/kb`). Protocol changes go
+the server; the contract is `docs/remote-api.md` in the Mindmill repo (github.com/MadsLangkilde/mindmill-macos; locally `~/projects/claude_plugins/kb`). Protocol changes go
 there first and must keep the iOS app (`~/projects/mindmill-ios`) working too. Each app keeps its own logic.
 
 ## Build and test
