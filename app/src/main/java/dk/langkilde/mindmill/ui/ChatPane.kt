@@ -81,6 +81,7 @@ import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.text
 import dk.langkilde.mindmill.remote.userMessage
 import dk.langkilde.mindmill.voice.ContinuousRecognizer
+import dk.langkilde.mindmill.voice.LiveChat
 import dk.langkilde.mindmill.voice.LivePhase
 import dk.langkilde.mindmill.voice.LiveUi
 import kotlinx.coroutines.launch
@@ -208,11 +209,14 @@ fun Composer(
     }
 }
 
-/** What live chat is doing, in the layout above the message box, with stop and end. */
+/**
+ * What live chat is doing, in the layout above the message box: what it heard so far (sent when the user pauses),
+ * and the buttons that fit the moment.
+ */
 @Composable
-fun LiveBar(ui: LiveUi, onStop: () -> Unit, onEnd: () -> Unit, onDismissNotice: () -> Unit) {
+fun LiveBar(live: LiveChat, ui: LiveUi) {
     val cs = MaterialTheme.colorScheme
-    ui.notice?.let { NoticeBar(it, Modifier.padding(top = 4.dp), error = true, onDismiss = onDismissNotice) }
+    ui.notice?.let { NoticeBar(it, Modifier.padding(top = 4.dp), error = true, onDismiss = { live.dismissNotice() }) }
     Surface(
         color = cs.primaryContainer, contentColor = cs.onPrimaryContainer, shape = RoundedCornerShape(14.dp),
         modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
@@ -221,23 +225,36 @@ fun LiveBar(ui: LiveUi, onStop: () -> Unit, onEnd: () -> Unit, onDismissNotice: 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
                 Text(
-                    when (ui.phase) {
-                        LivePhase.LISTENING -> "Listening…"
-                        LivePhase.WAITING -> "Sent. Waiting for the answer…"
-                        LivePhase.SPEAKING -> "Speaking"
-                        LivePhase.PAUSED -> "Paused while another app has the audio"
-                        LivePhase.IDLE -> "Starting…"
-                    },
+                    liveStatus(ui),
                     style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(start = 8.dp).weight(1f),
                 )
-                if (ui.phase == LivePhase.SPEAKING || ui.phase == LivePhase.WAITING) TextButton(onClick = onStop) { Text("Stop") }
-                TextButton(onClick = onEnd) { Text("End") }
+                TextButton(onClick = { live.end() }) { Text("End") }
             }
-            if (ui.partial.isNotBlank()) {
-                Text(ui.partial, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(bottom = 4.dp, end = 8.dp))
+            val heard = listOf(ui.draft, ui.partial).filter { it.isNotBlank() }.joinToString(" ")
+            if (heard.isNotEmpty()) {
+                Text(heard, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 2.dp, bottom = 4.dp, end = 8.dp))
+            }
+            val speaking = ui.phase == LivePhase.SPEAKING
+            if (speaking || ui.working || heard.isNotEmpty()) {
+                ChipFlow {
+                    if (heard.isNotEmpty()) {
+                        TextButton(onClick = { live.sendHeard() }) { Text("Send now") }
+                        if (ui.draft.isNotEmpty()) TextButton(onClick = { live.clearHeard() }) { Text("Clear") }
+                    }
+                    if (speaking) TextButton(onClick = { live.stopSpeaking() }) { Text("Stop talking") }
+                    if (ui.working) TextButton(onClick = { live.stopWork() }) { Text("Stop Claude") }
+                }
             }
         }
     }
+}
+
+private fun liveStatus(ui: LiveUi): String = when (ui.phase) {
+    LivePhase.LISTENING -> if (ui.draft.isNotEmpty()) "Listening. Sends when you pause." else "Listening…"
+    LivePhase.WAITING -> if (ui.working) "Working on it. Keep talking to add more, or say “stop”." else "Listening…"
+    LivePhase.SPEAKING -> "Speaking. Talk to interrupt."
+    LivePhase.PAUSED -> "Paused while another app has the audio"
+    LivePhase.IDLE -> "Starting…"
 }
 
 /**
@@ -344,7 +361,7 @@ fun ChatPane(
         problem?.let { ErrorState(it, onRetry = { scope.launch { fetch() } }, compact = true) }
         if (log.state == "blocked" && !log.busy) PermissionCard(id, log.denials)
         if (liveHere) {
-            LiveBar(live, onStop = { app.liveChat.stopSpeaking() }, onEnd = { app.liveChat.end() }, onDismissNotice = { app.liveChat.dismissNotice() })
+            LiveBar(app.liveChat, live)
         }
         Composer(
             placeholder = placeholder, draftKey = id,

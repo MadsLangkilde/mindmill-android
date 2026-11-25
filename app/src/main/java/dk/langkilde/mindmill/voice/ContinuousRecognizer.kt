@@ -14,7 +14,8 @@ import java.util.Locale
 /**
  * Android speech recognition in a loop. Prefers the on-device recogniser (API 31+) and falls back to the normal one
  * with offline preferred. Ends each utterance on the recogniser's own end-of-speech detection. With [continuous]
- * it starts again after every result (meetings); otherwise only after silence or a miss, until the caller stops it.
+ * it starts again after every result (meetings, live chat); otherwise only after silence or a miss, until the caller
+ * stops it.
  */
 class ContinuousRecognizer(
     private val context: Context,
@@ -23,10 +24,16 @@ class ContinuousRecognizer(
     interface Listener {
         fun onPartial(text: String)
         fun onFinal(text: String)
+        /** With [continuous]: an utterance ended without words. */
+        fun onNothing() {}
+        fun onLanguage(tag: String) {}
         fun onProblem(message: String)
     }
 
     var continuous = false
+    /** Languages to detect between (API 34+), such as `da-DK` and `en-US`; empty recognises only the locale. */
+    var detectLanguages: List<String> = emptyList()
+    private var detectionFailed = false
     private val main = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
     private var onDevice = false
@@ -94,6 +101,13 @@ class ContinuousRecognizer(
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
             if (!onDevice) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            if (detecting()) {
+                val tags = ArrayList(detectLanguages)
+                putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES, tags)
+                putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH, RecognizerIntent.LANGUAGE_SWITCH_BALANCED)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES, tags)
+            }
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, if (continuous) 1500L else 900L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, if (continuous) 1200L else 700L)
         }
@@ -103,6 +117,8 @@ class ContinuousRecognizer(
             retry(500)
         }
     }
+
+    private fun detecting() = detectLanguages.size > 1 && !detectionFailed && Build.VERSION.SDK_INT >= 34
 
     private fun retry(delayMs: Long) {
         if (!active) return
@@ -132,7 +148,14 @@ class ContinuousRecognizer(
             errorsInARow = 0
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
             if (!active) return
-            if (text.isBlank()) { retry(100); return }
+            if (text.isBlank()) {
+                if (continuous) listener.onNothing()
+                retry(100)
+                return
+            }
+            if (Build.VERSION.SDK_INT >= 34) {
+                results?.getString(SpeechRecognizer.DETECTED_LANGUAGE)?.takeIf { it.isNotBlank() }?.let { listener.onLanguage(it) }
+            }
             if (!continuous) active = false
             listener.onFinal(text)
             if (continuous) retry(100)
@@ -145,6 +168,7 @@ class ContinuousRecognizer(
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                     errorsInARow = 0
+                    if (continuous) listener.onNothing()
                     retry(100)
                 }
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
@@ -152,7 +176,10 @@ class ContinuousRecognizer(
                     listener.onProblem("Mindmill needs the microphone permission to listen.")
                 }
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> {
-                    if (onDevice) {
+                    if (detecting()) {
+                        detectionFailed = true
+                        retry(100)
+                    } else if (onDevice) {
                         onDeviceFailed = true
                         dropRecognizer()
                         retry(100)

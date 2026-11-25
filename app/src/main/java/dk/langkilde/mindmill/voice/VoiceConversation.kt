@@ -31,6 +31,10 @@ interface VoiceRemote {
 interface DeviceEvents {
     fun partial(text: String)
     fun heard(text: String)
+    /** An utterance ended without words (only while dictating). */
+    fun heardNothing() {}
+    /** The language the recogniser detected, as a BCP 47 tag (only when it detects one). */
+    fun heardLanguage(tag: String) {}
     fun utteranceDone(utteranceId: String)
     fun userStartedTalking()
     fun deviceProblem(message: String)
@@ -43,6 +47,8 @@ interface KeylessDevice {
     var events: DeviceEvents?
     fun configure(rate: Float, locale: Locale, voiceHint: String?)
     fun startListening()
+    /** Recognises utterance after utterance until [stopListening], telling [DeviceEvents.heardNothing] too. */
+    fun startDictating() = startListening()
     fun stopListening()
     fun speak(text: String, utteranceId: String)
     fun stopSpeaking()

@@ -102,7 +102,7 @@ fun NewSessionScreen(nav: Nav, mode: Mode) {
             if (starting) Loading(Modifier.padding(top = 12.dp), text = "Starting the session…")
         }
         if (liveHere) {
-            LiveBar(live, onStop = { app.liveChat.stopSpeaking() }, onEnd = { app.liveChat.end() }, onDismissNotice = { app.liveChat.dismissNotice() })
+            LiveBar(app.liveChat, live)
         }
         Composer(
             placeholder = if (mode == Mode.PLAN) "Ask Mindmill…" else "What should it build or fix?",

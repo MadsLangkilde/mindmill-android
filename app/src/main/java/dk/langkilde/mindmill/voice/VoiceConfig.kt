@@ -29,6 +29,9 @@ data class VoiceConfig(
     val confirmsRisky: Boolean = true,
     val language: String = "auto",
 ) {
+    /** The language follows the phone (`auto`). */
+    val followsPhone: Boolean get() = language.isBlank() || language == "auto"
+
     fun locale(device: Locale = Locale.getDefault()): Locale =
         if (language.isBlank() || language == "auto") device else Locale.forLanguageTag(language)
 

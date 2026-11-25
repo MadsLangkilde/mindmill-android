@@ -32,6 +32,13 @@ class Acknowledgements(private val random: Random = Random.Default) {
         return choices[random.nextInt(choices.size)].also { last = it }
     }
 
+    /** Said when more is added to a message Claude already works on. */
+    fun added(language: LiveLanguage): String {
+        val all = ADDED.getValue(language)
+        val choices = all.filter { it != last }.ifEmpty { all }
+        return choices[random.nextInt(choices.size)].also { last = it }
+    }
+
     companion object {
         val PHRASES = mapOf(
             LiveLanguage.EN to listOf(
@@ -51,6 +58,10 @@ class Acknowledgements(private val random: Random = Random.Default) {
                 "Jeg er i gang. Tilbage om lidt.",
             ),
         )
+        val ADDED = mapOf(
+            LiveLanguage.EN to listOf("Added that.", "Got it, I'll take that along.", "Noted, adding it.", "Okay, I'll include that."),
+            LiveLanguage.DA to listOf("Det tager jeg med.", "Noteret, jeg tilføjer det.", "Okay, det kommer med.", "Fint, det får jeg med."),
+        )
     }
 }
 
@@ -62,6 +73,7 @@ object LivePhrases {
     fun or(l: LiveLanguage) = if (l == LiveLanguage.DA) "eller" else "or"
     fun restOnScreen(l: LiveLanguage) = if (l == LiveLanguage.DA) "Resten står i chatten." else "The rest is in the chat."
     fun problem(l: LiveLanguage) = if (l == LiveLanguage.DA) "Der gik noget galt." else "Something went wrong."
+    fun stopped(l: LiveLanguage) = if (l == LiveLanguage.DA) "Jeg stoppede. Hvad vil du nu?" else "Stopped. What now?"
 }
 
 /** A Claude reply made fit to say out loud: no Markdown, no code or tables, options read out briefly. */
@@ -165,6 +177,7 @@ class ReplyFollower {
 
 /** What live chat asks of the phone and the Mac. */
 interface LiveEffects {
+    /** Keeps recognising speech, utterance after utterance, until [stopListening]. */
     fun startListening()
     fun stopListening()
     fun speak(text: String, utteranceId: String)
@@ -173,13 +186,41 @@ interface LiveEffects {
     fun stopBargeInWatch()
     /** Sends what the user said to the session (or starts the session with it). */
     fun send(text: String)
+    /** Stops what the session is doing. */
+    fun stopSession()
+    /** Calls [LiveChatMachine.pauseOver] after [ms], replacing any timer already running. */
+    fun startSendTimer(ms: Long)
+    fun cancelSendTimer()
 }
 
+/**
+ * LISTENING: nothing is being worked on; what the user says becomes the next message. WAITING: Claude works on it
+ * and the microphone stays open, so the user can add to it or say "stop". SPEAKING: a reply is read out; talking
+ * over it stops it.
+ */
 enum class LivePhase { IDLE, LISTENING, WAITING, SPEAKING, PAUSED }
 
+/** A whole utterance that means "stop what you're doing", in English or Danish. */
+object StopCommand {
+    private val PHRASES = setOf(
+        "stop", "stop it", "stop that", "stop now", "stop working", "please stop", "stop please", "cancel",
+        "cancel that", "cancel it", "abort", "halt", "hold on stop",
+        "stop det", "stop nu", "hold op", "hold så op", "annuller", "annullér", "afbryd", "afbryd det", "stop lige",
+    )
+
+    fun matches(text: String): Boolean {
+        val t = text.lowercase().replace(Regex("[^\\p{L}\\p{N} ]"), " ").replace(Regex("\\s+"), " ").trim()
+            .removePrefix("mindmill ").removePrefix("okay ").removePrefix("ok ").trim()
+        return t in PHRASES
+    }
+}
+
 /**
- * Talking live in a session: listen, send what was heard, say a short acknowledgement at once, speak the reply as
- * it comes, then listen again. Talking over the reply stops it and listens. Everything runs on one thread.
+ * Talking live in a session. What the user says is collected until they pause ([PAUSE_MS] after the recogniser's
+ * last result) and then sent, with a short acknowledgement. The microphone stays open while Claude works: more
+ * speech is added to the message, and "stop" stops the session. A reply is read out as it comes, with the
+ * recogniser off (it would hear the phone) and a voice detector watching for the user talking over it.
+ * Everything runs on one thread.
  */
 class LiveChatMachine(
     private val fx: LiveEffects,
@@ -193,99 +234,201 @@ class LiveChatMachine(
 
     var language = LiveLanguage.EN
 
-    private var turnOver = false
+    /** What has been heard and not sent yet. */
+    var draft = ""
+        private set
+
+    /** Claude works on something sent in this live chat. */
+    var working = false
+        private set
+
+    private var hearing = false
     private var muted = false
     private var watching = false
+    private var listening = false
     private var n = 0
     private val outstanding = LinkedHashSet<String>()
+    private val held = mutableListOf<String>()
 
     val queued: Int get() = outstanding.size
 
     fun start() {
-        clear()
+        reset()
+        phase = LivePhase.LISTENING
         listen()
     }
 
+    /** The recogniser has words for the utterance in progress. */
+    fun partial(text: String) {
+        if (!collecting() || text.isBlank()) return
+        hearing = true
+        fx.cancelSendTimer()
+    }
+
+    /** One utterance recognised. */
     fun heard(text: String) {
-        if (phase != LivePhase.LISTENING) return
-        if (text.isBlank()) { fx.startListening(); return }
-        clear()
-        phase = LivePhase.WAITING
-        fx.send(text.trim())
-        say("ack", acknowledgements.next(language))
+        if (!collecting()) return
+        hearing = false
+        val t = text.trim()
+        if (t.isEmpty()) { heardNothing(); return }
+        if (draft.isEmpty() && StopCommand.matches(t)) {
+            if (working) stopWork()
+            return
+        }
+        draft = if (draft.isEmpty()) t else "$draft $t"
+        fx.startSendTimer(PAUSE_MS)
+    }
+
+    /** The recogniser stopped without words (silence, or nothing it could make out). */
+    fun heardNothing() {
+        if (!collecting()) return
+        hearing = false
+        if (draft.isNotEmpty()) fx.startSendTimer(PAUSE_MS) else speakHeld()
+    }
+
+    /** The pause after the last utterance is long enough: send what was heard. */
+    fun pauseOver() {
+        if (hearing) return
+        sendDraft()
+    }
+
+    /** The send button: send what was heard now, with [extra] (the words still being recognised). */
+    fun sendNow(extra: String = "") {
+        if (!collecting()) return
+        val e = extra.trim()
+        if (e.isNotEmpty()) draft = if (draft.isEmpty()) e else "$draft $e"
+        hearing = false
+        sendDraft()
+    }
+
+    /** The user threw away what was heard. */
+    fun discardDraft() {
+        fx.cancelSendTimer()
+        draft = ""
+        speakHeld()
     }
 
     /** Something Claude said in this turn, ready to speak. */
     fun reply(text: String) {
         if (muted || text.isBlank()) return
         if (phase != LivePhase.WAITING && phase != LivePhase.SPEAKING) return
+        if (hearing || draft.isNotEmpty()) { held += text; return }
         say("reply", text)
-        phase = LivePhase.SPEAKING
-        if (!watching) { watching = true; fx.startBargeInWatch() }
     }
 
-    /** The session stopped working on it; listen again once everything is said. */
+    /** The session stopped working. */
     fun turnDone() {
-        if (phase != LivePhase.WAITING && phase != LivePhase.SPEAKING) return
-        turnOver = true
-        finishIfQuiet()
+        if (!working) return
+        working = false
+        if (phase == LivePhase.WAITING) phase = LivePhase.LISTENING
     }
 
     /** Sending failed: say why, then listen again. */
     fun failed(message: String) {
-        if (phase != LivePhase.WAITING && phase != LivePhase.SPEAKING) return
-        say("note", message)
-        turnOver = true
-        finishIfQuiet()
+        working = false
+        held.clear()
+        if (phase == LivePhase.WAITING || phase == LivePhase.SPEAKING) say("note", message)
     }
 
     fun utteranceDone(id: String) {
-        if (outstanding.remove(id)) finishIfQuiet()
+        if (!outstanding.remove(id) || outstanding.isNotEmpty()) return
+        stopWatch()
+        if (phase == LivePhase.SPEAKING) {
+            phase = if (working) LivePhase.WAITING else LivePhase.LISTENING
+            listen()
+        }
     }
 
-    /** The user talked over the reply, or tapped stop: drop the rest of this turn and listen. */
+    /** The user talked over the phone, or tapped stop while it spoke: stop speaking and listen. */
     fun bargeIn() {
-        if (phase != LivePhase.SPEAKING && phase != LivePhase.WAITING) return
+        if (phase != LivePhase.SPEAKING) return
         fx.stopSpeaking()
         outstanding.clear()
+        held.clear()
         stopWatch()
         muted = true
+        phase = if (working) LivePhase.WAITING else LivePhase.LISTENING
         listen()
+    }
+
+    /** "Stop", said or tapped, while Claude works: stop the session and say so. */
+    fun stopWork() {
+        if (!working || phase == LivePhase.IDLE || phase == LivePhase.PAUSED) return
+        fx.stopSession()
+        working = false
+        muted = true
+        held.clear()
+        fx.cancelSendTimer()
+        draft = ""
+        if (outstanding.isNotEmpty()) {
+            fx.stopSpeaking()
+            outstanding.clear()
+        }
+        phase = LivePhase.WAITING
+        say("note", LivePhrases.stopped(language))
     }
 
     fun pause() {
         if (phase == LivePhase.IDLE || phase == LivePhase.PAUSED) return
         fx.stopSpeaking()
-        fx.stopListening()
+        silence()
         stopWatch()
+        fx.cancelSendTimer()
         outstanding.clear()
+        held.clear()
+        hearing = false
         muted = true
         phase = LivePhase.PAUSED
     }
 
     fun resume() {
-        if (phase == LivePhase.PAUSED) listen()
+        if (phase != LivePhase.PAUSED) return
+        phase = if (working) LivePhase.WAITING else LivePhase.LISTENING
+        listen()
     }
 
     fun end() {
         if (phase == LivePhase.IDLE) return
         fx.stopSpeaking()
-        fx.stopListening()
+        silence()
         stopWatch()
-        clear()
+        fx.cancelSendTimer()
+        reset()
         phase = LivePhase.IDLE
+    }
+
+    private fun collecting() = phase == LivePhase.LISTENING || phase == LivePhase.WAITING
+
+    private fun sendDraft() {
+        fx.cancelSendTimer()
+        val text = draft.trim()
+        draft = ""
+        if (text.isEmpty()) { speakHeld(); return }
+        val adding = working
+        working = true
+        muted = false
+        fx.send(text)
+        phase = LivePhase.WAITING
+        say("ack", if (adding) acknowledgements.added(language) else acknowledgements.next(language))
+        speakHeld()
+    }
+
+    private fun speakHeld() {
+        if (held.isEmpty()) return
+        val all = held.toList()
+        held.clear()
+        all.forEach { say("reply", it) }
     }
 
     private fun say(kind: String, text: String) {
         val id = "$kind:${n++}"
+        if (outstanding.isEmpty()) {
+            silence()
+            if (!watching) { watching = true; fx.startBargeInWatch() }
+        }
         outstanding += id
+        phase = LivePhase.SPEAKING
         fx.speak(text, id)
-    }
-
-    private fun finishIfQuiet() {
-        if (!turnOver || outstanding.isNotEmpty()) return
-        stopWatch()
-        listen()
     }
 
     private fun stopWatch() {
@@ -293,14 +436,30 @@ class LiveChatMachine(
     }
 
     private fun listen() {
-        turnOver = false
-        phase = LivePhase.LISTENING
+        if (listening) return
+        listening = true
         fx.startListening()
     }
 
-    private fun clear() {
-        turnOver = false
+    private fun silence() {
+        if (!listening) return
+        listening = false
+        hearing = false
+        fx.stopListening()
+    }
+
+    private fun reset() {
+        working = false
         muted = false
+        hearing = false
+        listening = false
+        draft = ""
         outstanding.clear()
+        held.clear()
+    }
+
+    companion object {
+        /** How long a pause after the last utterance sends the message (the recogniser has waited ~1.5 s already). */
+        const val PAUSE_MS = 1_600L
     }
 }

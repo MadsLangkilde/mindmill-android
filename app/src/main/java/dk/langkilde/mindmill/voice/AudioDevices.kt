@@ -154,7 +154,13 @@ class BargeInMonitor(private val context: Context, private val onSpeech: () -> U
 
     private fun watch() {
         val frame = 320
-        val rec = openMic(context, 16_000, frame) ?: run { running = false; return }
+        var rec: AudioRecord? = null
+        for (attempt in 0 until 6) {
+            rec = openMic(context, 16_000, frame)
+            if (rec != null || !running) break
+            Thread.sleep(80)
+        }
+        if (rec == null) { running = false; return }
         val effects = cleanupEffects(rec.audioSessionId)
         val vad = EnergyVad(frameMs = 20)
         val buf = ShortArray(frame)
@@ -258,6 +264,8 @@ class AndroidKeylessDevice(
     private val recognizer = ContinuousRecognizer(context, object : ContinuousRecognizer.Listener {
         override fun onPartial(text: String) { events?.partial(text) }
         override fun onFinal(text: String) { events?.heard(text) }
+        override fun onNothing() { events?.heardNothing() }
+        override fun onLanguage(tag: String) { events?.heardLanguage(tag) }
         override fun onProblem(message: String) { events?.deviceProblem(message) }
     })
     private val speaker = Speaker(context, { events?.utteranceDone(it) }, { events?.deviceProblem(it) })
@@ -288,8 +296,20 @@ class AndroidKeylessDevice(
 
     override fun startListening() {
         bargeIn.stop()
+        recognizer.continuous = false
+        recognizer.detectLanguages = emptyList()
         recognizer.start(locale)
     }
+
+    override fun startDictating() {
+        bargeIn.stop()
+        recognizer.continuous = true
+        recognizer.detectLanguages = detectLanguages
+        recognizer.start(locale)
+    }
+
+    /** Languages to tell apart while dictating, when the language follows the phone; empty for a fixed language. */
+    var detectLanguages: List<String> = emptyList()
 
     override fun stopListening() = recognizer.stop()
     override fun speak(text: String, utteranceId: String) = speaker.speak(text, utteranceId)
