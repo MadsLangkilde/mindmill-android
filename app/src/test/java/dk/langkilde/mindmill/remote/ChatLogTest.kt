@@ -57,4 +57,21 @@ class ChatLogTest {
         assertTrue(log.isBehind(2))
         assertTrue(log.isBehind(null))
     }
+
+    @Test fun keepsTheSessionsSuggestions() {
+        val log = ChatLog()
+        val r = jsonOf(
+            "session" to jsonOf("id" to "s1", "state" to "idle"),
+            "items" to listOf(jsonOf("role" to "assistant", "text" to "Noted.")),
+            "count" to 1,
+            "suggestions" to listOf(jsonOf("id" to "acme/inbox/x", "section" to "facts", "title" to "A fact", "reason" to "You said so")),
+        )
+        log.apply(r, 0)
+        assertEquals(listOf("A fact"), log.suggestions.map { it.title })
+        log.apply(answer(1), 1)
+        assertTrue(log.suggestions.isEmpty())
+        log.apply(r, 0)
+        log.reset()
+        assertTrue(log.suggestions.isEmpty())
+    }
 }

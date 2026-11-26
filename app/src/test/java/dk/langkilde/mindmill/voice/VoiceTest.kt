@@ -168,9 +168,10 @@ private class FakeRemote(var config: VoiceConfig, var engine: VoiceEngine?) : Vo
     val calls = mutableListOf<String>()
     val frames = mutableListOf<BinaryFrame>()
     var forced: Boolean? = null
+    var session: String? = null
     override suspend fun config() = config.also { calls += "config" }
-    override suspend fun start(scope: String?, forceKeyless: Boolean): Pair<String, VoiceEngine?> {
-        calls += "start"; forced = forceKeyless
+    override suspend fun start(scope: String?, forceKeyless: Boolean, session: String?): Pair<String, VoiceEngine?> {
+        calls += "start"; forced = forceKeyless; this.session = session
         return "conv1" to engine
     }
     override suspend fun say(conversation: String, text: String): String { calls += "say:$conversation:$text"; return "t1" }
@@ -211,6 +212,21 @@ class EngineSelectionTest {
         val device = FakeDevice()
         val audio = FakeAudio()
         return Triple(VoiceConversation(remote, device, audio, this), remote, device to audio)
+    }
+
+    @Test
+    fun voiceChangedReachesTheNextConversationButNotTheOneGoingOn() = runTest(UnconfinedTestDispatcher()) {
+        val (c, remote, _) = conversation(VoiceConfig(engine = VoiceEngine.API, providerName = "OpenAI Realtime"), VoiceEngine.API)
+        c.begin(null, keylessOnly = false)
+        assertEquals("OpenAI Realtime via the Mac", c.ui.value.engineLabel)
+        c.configChanged(VoiceConfig(engine = VoiceEngine.API, providerName = "Google Gemini Live"))
+        assertEquals("OpenAI Realtime", c.config.providerName)
+        c.end()
+        c.configChanged(VoiceConfig(engine = VoiceEngine.API, providerName = "Google Gemini Live"))
+        assertEquals("Google Gemini Live", c.config.providerName)
+        remote.config = VoiceConfig(engine = VoiceEngine.API, providerName = "Google Gemini Live")
+        c.begin(null, keylessOnly = false)
+        assertEquals("Google Gemini Live via the Mac", c.ui.value.engineLabel)
     }
 
     @Test
@@ -284,6 +300,28 @@ class EngineSelectionTest {
         assertEquals(KeylessState.LISTENING, c.machine.state)
         c.end()
         assertTrue("end:conv1" in remote.calls)
+    }
+
+    @Test
+    fun sessionVoiceShowsWhatItHearsAndHandsOverToOnPhoneVoiceWhenTheApiFails() = runTest(UnconfinedTestDispatcher()) {
+        val (c, remote, hw) = conversation(VoiceConfig(engine = VoiceEngine.API, providerName = "Google Gemini Live"), VoiceEngine.API)
+        var handedOver: String? = null
+        c.onSessionFallback = { handedOver = it }
+        c.begin("proj", keylessOnly = false, session = "s1")
+        assertEquals("s1", remote.session)
+        assertEquals("s1", c.ui.value.session)
+        assertTrue("stream" in hw.second.log)
+        c.onEvent("voice.transcript", jsonOf("conversation" to "conv1", "role" to "user", "text" to "find the", "final" to false))
+        c.onEvent("voice.transcript", jsonOf("conversation" to "conv1", "role" to "user", "text" to "find the login bug", "final" to false))
+        assertEquals("find the login bug", c.ui.value.partial)
+        assertTrue(c.ui.value.bubbles.isEmpty())
+        c.onEvent("voice.transcript", jsonOf("conversation" to "conv1", "role" to "user", "text" to "find the login bug", "final" to true))
+        assertEquals("", c.ui.value.partial)
+        c.onEvent("voice.fallback", jsonOf("conversation" to "conv1", "reason" to "badKey", "speech" to "x"))
+        assertEquals("s1", handedOver)
+        assertFalse(c.ui.value.active)
+        assertTrue("end:conv1" in remote.calls)
+        assertTrue(hw.first.spoken.isEmpty())
     }
 
     @Test

@@ -18,6 +18,8 @@ import dk.langkilde.mindmill.remote.RemoteException
 import dk.langkilde.mindmill.remote.RemoteMessage
 import dk.langkilde.mindmill.remote.RpcChannel
 import dk.langkilde.mindmill.remote.Scopes
+import dk.langkilde.mindmill.remote.SkillInfo
+import dk.langkilde.mindmill.remote.TestTarget
 import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.string
 import dk.langkilde.mindmill.remote.text
@@ -79,10 +81,10 @@ class ConfirmationBroker {
     fun answer(yes: Boolean) { _pending.value?.answer?.complete(yes) }
 }
 
-private class RpcVoiceRemote(private val rpc: RpcChannel) : VoiceRemote {
-    override suspend fun config() = VoiceConfig.parse(rpc.call("voice.config"))
-    override suspend fun start(scope: String?, forceKeyless: Boolean): Pair<String, VoiceEngine?> {
-        val r = rpc.call("voice.start", jsonOf("scope" to scope, "engine" to if (forceKeyless) "keyless" else null))
+private class RpcVoiceRemote(private val rpc: RpcChannel, private val loadConfig: suspend () -> VoiceConfig) : VoiceRemote {
+    override suspend fun config() = loadConfig()
+    override suspend fun start(scope: String?, forceKeyless: Boolean, session: String?): Pair<String, VoiceEngine?> {
+        val r = rpc.call("voice.start", jsonOf("scope" to scope, "engine" to if (forceKeyless) "keyless" else null, "session" to session))
         val conv = r.text("conversation") ?: throw RemoteException("failed", "The Mac didn't start a conversation.")
         return conv to VoiceEngine.from(r.string("engine"))
     }
@@ -92,6 +94,9 @@ private class RpcVoiceRemote(private val rpc: RpcChannel) : VoiceRemote {
     override suspend fun end(conversation: String) { rpc.call("voice.end", jsonOf("conversation" to conversation)) }
     override fun sendFrame(frame: BinaryFrame) = rpc.sendFrame(frame)
 }
+
+/** A test build runs the project's tests and builds it on the Mac: allow for a slow one. */
+const val TEST_BUILD_TIMEOUT_MS = 45 * 60_000L
 
 class MindmillApp : Application() {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -148,9 +153,10 @@ class MindmillApp : Application() {
             .stateIn(scope, SharingStarted.Eagerly, connection.active?.scope)
         actions = ActionRunner({ m, p -> call(m, p) }, confirmations::ask)
         voiceDevice = AndroidKeylessDevice(this) { settings.value.routeToHeadset }
-        voice = VoiceConversation(RpcVoiceRemote(rpc), voiceDevice, AndroidApiAudio(this), scope)
+        voice = VoiceConversation(RpcVoiceRemote(rpc) { fetchVoiceConfig() }, voiceDevice, AndroidApiAudio(this), scope)
         liveChat = LiveChat({ m, p -> call(m, p) }, AndroidKeylessDevice(this) { settings.value.routeToHeadset }, scope)
         meeting = LiveMeeting(this, rpc, scope) { on -> micForMeeting = on; updateMic() }
+        voice.onSessionFallback = { id -> liveChat.startInSession(id) }
         deliveries = Deliveries(this, rpc, scope)
 
         rpc.addEventListener { e -> scope.launch { handle(e) } }
@@ -175,8 +181,10 @@ class MindmillApp : Application() {
                 if (connected && !wasConnected) {
                     _refresh.update { it + 1 }
                     catalog = null
+                    forgetSkills()
                     if (connection.active?.scope == null) s.hello.scope?.let { setScope(it) }
                     loadReviewCards()
+                    scope.launch { runCatching { fetchVoiceConfig() } }
                 }
                 if (!connected && wasConnected && voice.ui.value.active) voice.end()
                 if (!connected && wasConnected) liveChat.end()
@@ -227,6 +235,29 @@ class MindmillApp : Application() {
         return true
     }
 
+    /**
+     * Talks live in session [id]: through the Mac's voice API (Gemini, OpenAI…) when it has one, so the voice model
+     * talks and says the session's progress; otherwise with the phone's own speech.
+     */
+    fun startLive(id: String) {
+        scope.launch {
+            val config = runCatching { fetchVoiceConfig() }.getOrNull() ?: _voiceConfig.value
+            if (config?.engine == VoiceEngine.API && !settings.value.keylessOnly) {
+                voice.begin(currentScope, keylessOnly = false, session = id)
+                if (voice.ui.value.active) return@launch
+                voice.ui.value.notice?.let { done("The voice API didn't start, so the phone's own voice is used: $it", error = true) }
+                voice.dismissNotice()
+            }
+            liveChat.startInSession(id)
+        }
+    }
+
+    /** Ends live voice in a session, whichever kind runs. */
+    fun endLive() {
+        if (voice.ui.value.session != null) voice.end()
+        liveChat.end()
+    }
+
     /** Forgets a paired Mac; when it is the active one, the phone moves on to another or back to pairing. */
     fun removeMac(fingerprint: String) {
         if (connection.active?.isMac(fingerprint) == true && voice.ui.value.active) voice.end()
@@ -237,10 +268,14 @@ class MindmillApp : Application() {
     private fun forgetMacData() {
         if (voice.ui.value.active) voice.end()
         liveChat.end()
+        confirmations.answer(false)
         catalog = null
+        _voiceConfig.value = null
+        forgetSkills()
         _reviewCards.value = emptyList()
         _notice.value = null
         deliveries.clear()
+        _buildsStarting.value = emptySet()
         _refresh.update { it + 1 }
     }
 
@@ -298,6 +333,78 @@ class MindmillApp : Application() {
         null
     }
 
+    private val _buildsStarting = MutableStateFlow<Set<String>>(emptySet())
+    /** Test targets the phone asked the Mac to build, until the Mac answers. */
+    val buildsStarting: StateFlow<Set<String>> = _buildsStarting
+
+    /**
+     * Asks the Mac to build [target] and deliver it to test (`test.deliver`). A build takes minutes, so the answer is
+     * awaited far longer than other requests; meanwhile the Test screen lists it as building.
+     */
+    fun requestTestBuild(target: TestTarget, scopeId: String?, session: String? = null) {
+        if (target.id in _buildsStarting.value) return
+        _buildsStarting.update { it + target.id }
+        val mac = connection.pairedMacName ?: "the Mac"
+        done("Building ${target.title} on $mac. It shows up on Test when it's ready.")
+        scope.launch {
+            kotlinx.coroutines.delay(1_500)
+            bumpRefresh()
+        }
+        scope.launch {
+            val runner = ActionRunner({ m, p -> call(m, p, TEST_BUILD_TIMEOUT_MS) }, confirmations::ask)
+            try {
+                val o = runner.run("test.deliver", jsonOf("target" to target.id, "scope" to scopeId, "session" to session))
+                when (o.status) {
+                    ActionOutcome.Status.DONE -> done(o.speech.ifBlank { "Delivered ${target.title}." })
+                    ActionOutcome.Status.FAILED -> done(o.speech.ifBlank { "Building ${target.title} didn't work." }, error = true)
+                    ActionOutcome.Status.CANCELLED -> done("Cancelled.")
+                    ActionOutcome.Status.NEEDS_CONFIRMATION -> Unit
+                }
+            } catch (e: Exception) {
+                done(e.userMessage(), error = true)
+            } finally {
+                _buildsStarting.update { it - target.id }
+                bumpRefresh()
+            }
+        }
+    }
+
+    private val _voiceConfig = MutableStateFlow<VoiceConfig?>(null)
+    /** The Mac's voice settings as last heard (`voice.config`, `voice.changed`): which engine the next conversation uses. */
+    val voiceConfig: StateFlow<VoiceConfig?> = _voiceConfig
+
+    /** `voice.config`, kept for showing which voice is used. */
+    suspend fun fetchVoiceConfig(): VoiceConfig = VoiceConfig.parse(call("voice.config")).also { _voiceConfig.value = it }
+
+    private val skillsCache = java.util.concurrent.ConcurrentHashMap<String, List<SkillInfo>>()
+    @Volatile private var skillsMissing = false
+    private val _skillsVersion = MutableStateFlow(0)
+    /** Bumps on `skills.changed`: lists of skills, plugins and tools load again. */
+    val skillsVersion: StateFlow<Int> = _skillsVersion
+
+    /**
+     * `skills.list` for a session (or a scope), kept until `skills.changed`. Empty from a Mac that doesn't know it, which
+     * isn't asked again on this connection.
+     */
+    suspend fun skillsFor(session: String?, scopeId: String?): List<SkillInfo> {
+        if (skillsMissing) return emptyList()
+        val key = session?.let { "s:$it" } ?: "c:${scopeId.orEmpty()}"
+        skillsCache[key]?.let { return it }
+        return try {
+            SkillInfo.list(call("skills.list", jsonOf("session" to session, "scope" to if (session == null) scopeId else null)))
+                .also { skillsCache[key] = it }
+        } catch (e: RemoteException) {
+            if (e.isUnknownMethod) skillsMissing = true
+            emptyList()
+        }
+    }
+
+    private fun forgetSkills() {
+        skillsCache.clear()
+        skillsMissing = false
+        _skillsVersion.update { it + 1 }
+    }
+
     @Volatile private var catalog: Pair<List<ActionInfo>, List<String>>? = null
 
     /** `actions.list`, kept until the connection changes. */
@@ -336,6 +443,11 @@ class MindmillApp : Application() {
                 show("Ready for review: ${e.data.string("title") ?: "a change"}", "Review", "test")
             }
             "session.changed" -> liveChat.onSessionChanged(e.data.text("id"))
+            "voice.changed" -> VoiceConfig.parse(e.data).let { c ->
+                _voiceConfig.value = c
+                voice.configChanged(c)
+            }
+            "skills.changed" -> forgetSkills()
             else -> if (e.name.startsWith("voice.")) voice.onEvent(e.name, e.data)
         }
         _events.tryEmit(e)

@@ -46,6 +46,12 @@ sealed interface Screen {
     @Serializable data class MeetingDetail(val id: String, val title: String) : Screen
     @Serializable data object LiveMeeting : Screen
     @Serializable data class Web(val title: String, val url: String, val preview: Boolean) : Screen
+    /** What the session's AI can use: skills, plugins and tools (MCP servers). */
+    @Serializable data class SkillsTools(val tab: String = "skills") : Screen
+    /** One of the user's own skills; [name] null writes a new one. */
+    @Serializable data class SkillEditor(val name: String?, val location: String = "user", val scope: String? = null) : Screen
+    /** Whether each kind of entry is private or shared by default, in [scope] (the current one when null). */
+    @Serializable data class SharingDefaults(val scope: String? = null) : Screen
 }
 
 /** One screen on a back stack; [id] tells two visits of the same screen apart and keys its saved state. */

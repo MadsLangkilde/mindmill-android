@@ -38,6 +38,7 @@ object ErrorCodes {
     const val BAD_PARAMS = "bad_params"
     const val NOT_FOUND = "not_found"
     const val UNKNOWN_METHOD = "unknown_method"
+    const val UNAVAILABLE = "unavailable"
     const val FAILED = "failed"
     const val TIMEOUT = "timeout"
     const val OFFLINE = "offline"
@@ -45,6 +46,7 @@ object ErrorCodes {
 
 class RemoteException(val code: String, message: String) : Exception(message) {
     val isUnknownMethod get() = code == ErrorCodes.UNKNOWN_METHOD
+    val isUnavailable get() = code == ErrorCodes.UNAVAILABLE
     val isUnauthorized get() = code == ErrorCodes.UNAUTHORIZED
     val isOffline get() = code == ErrorCodes.OFFLINE || code == ErrorCodes.TIMEOUT
 }

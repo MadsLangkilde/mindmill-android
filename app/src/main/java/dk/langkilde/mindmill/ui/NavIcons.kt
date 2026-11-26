@@ -11,6 +11,9 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Folder
@@ -42,6 +45,9 @@ fun sectionIcon(id: String, sfSymbol: String = ""): ImageVector = when (id) {
     "home" -> Icons.Default.Home
     "today" -> Icons.Default.Today
     "inbox" -> Icons.Default.Inbox
+    "notes" -> Icons.Default.EditNote
+    "skills" -> Icons.Default.Extension
+    "sharing" -> Icons.Default.Lock
     "decisions" -> Icons.Default.Verified
     "meetings" -> Icons.Default.Groups
     "discussions" -> Icons.Default.Forum
@@ -74,6 +80,7 @@ fun sectionIcon(id: String, sfSymbol: String = ""): ImageVector = when (id) {
 private fun symbolIcon(name: String): ImageVector = when {
     name.isBlank() -> Icons.Default.Circle
     "magnifyingglass" in name -> Icons.Default.Search
+    name.startsWith("note") || "pencil" in name -> Icons.Default.EditNote
     "bubble" in name -> Icons.Default.Forum
     "checklist" in name || "checkmark" in name -> Icons.Default.Checklist
     "person" in name -> Icons.Default.Groups

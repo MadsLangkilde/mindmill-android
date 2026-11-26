@@ -140,6 +140,18 @@ class LiveChatTest {
         assertEquals("New answer", fx.spoken.last().second)
     }
 
+    @Test fun talkingOverTheAcknowledgementStillReadsTheReply() {
+        val fx = Fx()
+        val m = LiveChatMachine(fx)
+        m.start()
+        m.say(fx, "what's new")
+        assertEquals("ack", fx.spoken.single().first.substringBefore(":"))
+        m.bargeIn()
+        assertEquals(LivePhase.WAITING, m.phase)
+        m.reply("Three things changed today.")
+        assertEquals("Three things changed today.", fx.spoken.last().second)
+    }
+
     @Test fun theSendButtonSendsAtOnceWithTheWordsStillComingIn() {
         val fx = Fx()
         val m = LiveChatMachine(fx)

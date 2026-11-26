@@ -44,7 +44,13 @@ data class Delivery(
     val title: String,
     val url: String?,
     val size: Long?,
+    /** building, ready, sent, installed or failed; null from a Mac that doesn't say. */
+    val state: String? = null,
+    val message: String? = null,
 ) {
+    val isBuilding get() = state == "building"
+    val hasFailed get() = state == "failed"
+
     companion object {
         /** A delivery this phone can use; null for one meant for another platform (an iPhone's build, TestFlight). */
         fun parse(o: JsonObject): Delivery? {
@@ -53,6 +59,7 @@ data class Delivery(
             return Delivery(
                 id = id, scope = o.string("scope"), target = o.string("target"), kind = o.string("kind") ?: "url",
                 title = o.string("title") ?: "Delivery", url = o.string("url"), size = o.long("size"),
+                state = o.string("state"), message = o.string("message"),
             )
         }
 

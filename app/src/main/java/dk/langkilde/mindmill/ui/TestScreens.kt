@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -48,7 +49,9 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import dk.langkilde.mindmill.delivery.Delivery
 import dk.langkilde.mindmill.delivery.InstallStep
 import dk.langkilde.mindmill.delivery.PreviewWebViewClient
+import dk.langkilde.mindmill.remote.BuildChoice
 import dk.langkilde.mindmill.remote.ConnectionState
+import dk.langkilde.mindmill.remote.TestTarget
 import dk.langkilde.mindmill.remote.bool
 import dk.langkilde.mindmill.remote.int
 import dk.langkilde.mindmill.remote.jsonOf
@@ -60,6 +63,7 @@ import dk.langkilde.mindmill.remote.text
 import dk.langkilde.mindmill.remote.userMessage
 import dk.langkilde.mindmill.store.StoredPairing
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -70,7 +74,10 @@ fun TestScreen(nav: Nav) {
     val deliveries by app.deliveries.list.collectAsState()
     val steps by app.deliveries.steps.collectAsState()
     val cards by app.reviewCards.collectAsState()
-    val (state, retry) = rememberLoad(rememberCurrentScope()) {
+    val starting by app.buildsStarting.collectAsState()
+    val scopeId = rememberCurrentScope()
+    var tick by remember { mutableIntStateOf(0) }
+    val (state, retry) = rememberLoad(scopeId, trigger = tick) {
         app.call("test.status", jsonOf("scope" to app.currentScope)).also { r ->
             app.deliveries.merge(r.objects("deliveries").mapNotNull(Delivery::parse))
             app.loadReviewCards()
@@ -79,16 +86,66 @@ fun TestScreen(nav: Nav) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         steps.filterValues { it == InstallStep.NeedsPermission }.keys.forEach(app.deliveries::permissionGranted)
     }
-    val targets = state.value?.objects("targets").orEmpty()
+    val checking = state.value?.bool("checking") == true
+    val building = starting.isNotEmpty() || deliveries.any { it.isBuilding }
+    LaunchedEffect(building, checking) {
+        while (building || checking) {
+            delay(if (checking) 3_000 else 5_000)
+            tick++
+        }
+    }
+    val mac = app.connection.pairedMacName ?: "the Mac"
+    val targets = state.value?.objects("targets").orEmpty().filter { TestTarget.forAndroid(it.string("type")) }
+    val buildable = TestTarget.list(state.value).filter { TestTarget.forAndroid(it.type) }
+    var detecting by remember { mutableStateOf(false) }
+    var rechecking by remember { mutableStateOf(false) }
+    val ui = rememberCoroutineScope()
     RefreshList(state.refreshing, retry) {
         item {
             LoadStatus(state, retry)
             if (cards.isNotEmpty()) SectionTitle("Ready for review")
         }
         items(cards, key = { it.text("id").orEmpty() }) { c -> ReviewCard(c) }
+        if (state.value != null) item {
+            SectionTitle("Send a new version to this phone")
+            if (checking) {
+                Text("Checking what $mac can build…", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 4.dp))
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            when {
+                buildable.isNotEmpty() -> {
+                    buildable.forEach { t -> BuildRow(t, BuildChoice.of(t, deliveries, starting), checking) { app.requestTestBuild(t, scopeId) } }
+                    if (!checking && buildable.any { BuildChoice.of(it, deliveries, starting) is BuildChoice.Blocked }) {
+                        OutlinedButton(enabled = !rechecking, onClick = {
+                            rechecking = true
+                            ui.launch {
+                                runCatching { app.call("action.run", jsonOf("name" to "test.check", "params" to jsonOf("scope" to scopeId)), 5 * 60_000L) }
+                                    .onFailure { app.done(it.userMessage(), error = true) }
+                                rechecking = false
+                                retry()
+                            }
+                        }) { Text(if (rechecking) "Checking $mac again…" else "Check $mac again") }
+                    }
+                }
+                else -> {
+                    Text(
+                        state.value?.string("note") ?: "Mindmill hasn't found anything to build in this project yet.",
+                        style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                    OutlinedButton(enabled = !detecting, onClick = {
+                        detecting = true
+                        ui.launch {
+                            app.runAndReport("test.detect", jsonOf("scope" to scopeId))
+                            detecting = false
+                            retry()
+                        }
+                    }) { Text(if (detecting) "Looking…" else "Look for what can be tested") }
+                }
+            }
+        }
         item {
             SectionTitle("Builds and previews")
-            if (deliveries.isEmpty()) ListEmptyState("Nothing to test yet. Builds from sessions and factories show up here.")
+            if (deliveries.isEmpty()) ListEmptyState("Nothing sent to this phone yet.")
         }
         items(deliveries, key = { it.id }) { d -> DeliveryRow(d, steps[d.id], nav) }
         if (targets.isNotEmpty()) {
@@ -109,6 +166,26 @@ fun TestScreen(nav: Nav) {
     }
 }
 
+/** One test target: build it now, or what's happening or missing. */
+@Composable
+private fun BuildRow(t: TestTarget, choice: BuildChoice, checking: Boolean, onBuild: () -> Unit) {
+    val app = LocalApp.current
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Text(t.title, style = MaterialTheme.typography.bodyLarge)
+        when (choice) {
+            BuildChoice.Build -> Button(onClick = onBuild, modifier = Modifier.padding(top = 4.dp)) { Text(t.buildLabel) }
+            BuildChoice.Building -> {
+                Text("Building on ${app.connection.pairedMacName ?: "the Mac"}…", style = MaterialTheme.typography.bodySmall)
+                LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
+            }
+            is BuildChoice.Blocked -> if (!checking) Text(
+                if (t.unavailable != null) choice.why else "${choice.why}. Finish its set-up on the Mac.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
 @Composable
 private fun DeliveryRow(d: Delivery, step: InstallStep?, nav: Nav) {
     val app = LocalApp.current
@@ -119,7 +196,12 @@ private fun DeliveryRow(d: Delivery, step: InstallStep?, nav: Nav) {
             when (d.kind) { "apk" -> "Android build"; "preview" -> "Preview"; else -> "Link" },
             d.target, d.size?.takeIf { it > 1024 * 1024 }?.let { "${it / 1024 / 1024} MB" },
         ).joinToString(" · "), style = MaterialTheme.typography.bodySmall)
-        when (d.kind) {
+        if (d.isBuilding) {
+            Text("Building on ${app.connection.pairedMacName ?: "the Mac"}…", style = MaterialTheme.typography.bodySmall)
+            LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
+        } else if (d.hasFailed) {
+            NoticeBar(d.message ?: "This build failed.", error = true)
+        } else when (d.kind) {
             "apk" -> when (step) {
                 InstallStep.NeedsPermission -> InstallPermissionGuide(d)
                 is InstallStep.Downloading -> {
@@ -349,10 +431,12 @@ fun ConnectionScreen(nav: Nav) {
                 }
             }
             SectionCard("Voice") {
+                VoiceEngineLine(Modifier.padding(bottom = 4.dp))
                 SwitchRow("Always use the phone's own voice", settings.keylessOnly, { v -> app.updateSettings { it.copy(keylessOnly = v) } },
                     detail = "Off: the Mac decides, and may use its real-time voice.")
                 SwitchRow("Bluetooth headset or car", settings.routeToHeadset, { v -> app.updateSettings { it.copy(routeToHeadset = v) } },
                     detail = "Talk through it when one is connected.")
+                VoiceKeyTest(Modifier.padding(top = 6.dp))
             }
             if (android.os.Build.VERSION.SDK_INT >= 31) {
                 SectionCard("Look") {

@@ -35,12 +35,20 @@ data class VoiceConfig(
     fun locale(device: Locale = Locale.getDefault()): Locale =
         if (language.isBlank() || language == "auto") device else Locale.forLanguageTag(language)
 
+    /** Which voice a conversation uses: the Mac's voice API ("Google Gemini Live via the Mac") or the phone's own. */
+    fun engineLabel(keylessOnly: Boolean = false): String =
+        if (engine == VoiceEngine.API && !keylessOnly) apiLabel else ON_PHONE
+
+    val apiLabel: String get() = "${providerName ?: provider ?: "Voice API"} via the Mac"
+
     fun toJson(): JsonObject = jsonOf(
         "engine" to engine.wire, "provider" to provider, "providerName" to providerName, "model" to model,
         "rate" to rate, "voice" to voice, "confirmsRisky" to confirmsRisky, "language" to language,
     )
 
     companion object {
+        const val ON_PHONE = "On this phone"
+
         val FIELDS = setOf("engine", "provider", "providerName", "model", "rate", "voice", "confirmsRisky", "language")
 
         fun parse(o: JsonObject?) = VoiceConfig(

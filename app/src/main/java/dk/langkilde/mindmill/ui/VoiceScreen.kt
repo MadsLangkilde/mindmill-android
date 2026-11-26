@@ -30,6 +30,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import dk.langkilde.mindmill.remote.RemoteException
+import dk.langkilde.mindmill.remote.bool
 import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.string
 import dk.langkilde.mindmill.remote.userMessage
@@ -80,6 +85,7 @@ fun VoiceScreen(nav: Nav) {
             Button(onClick = ::start, enabled = !ui.starting, modifier = Modifier.fillMaxWidth()) {
                 Text(if (ui.starting) "Starting…" else "Talk to $brain")
             }
+            VoiceEngineLine(Modifier.padding(top = 6.dp))
             Text(
                 "Talk as you would to a colleague: it can do anything Mindmill on the Mac can. Start speaking while it " +
                     "answers to interrupt. It keeps going with the screen off.",
@@ -117,6 +123,7 @@ fun VoiceScreen(nav: Nav) {
                     Text("Use a Bluetooth headset or car when connected", modifier = Modifier.weight(1f))
                     Switch(settings.routeToHeadset, { v -> app.updateSettings { it.copy(routeToHeadset = v) } })
                 }
+                VoiceKeyTest(Modifier.padding(vertical = 6.dp))
             }
         }
     }
@@ -154,6 +161,52 @@ private fun VoiceCard(card: VoiceActionCard, nav: Nav) {
                         }
                     }) { Text("No") }
                 }
+            }
+        }
+    }
+}
+
+/** Which voice the next conversation uses: the Mac's voice API, or the phone's own (from `voice.config` / `voice.changed`). */
+@Composable
+fun VoiceEngineLine(modifier: Modifier = Modifier) {
+    val app = LocalApp.current
+    val config by app.voiceConfig.collectAsState()
+    val settings by app.settings.collectAsState()
+    LaunchedEffect(Unit) { if (app.voiceConfig.value == null) runCatching { app.fetchVoiceConfig() } }
+    val c = config ?: return
+    Text("Voice: ${c.engineLabel(settings.keylessOnly)}", style = MaterialTheme.typography.bodyMedium, modifier = modifier)
+}
+
+/** Test voice key: asks the Mac to check the voice API key it holds (`voice.test`); the key never comes to the phone. */
+@Composable
+fun VoiceKeyTest(modifier: Modifier = Modifier) {
+    val app = LocalApp.current
+    val scope = rememberCoroutineScope()
+    var testing by remember { mutableStateOf(false) }
+    var missing by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+    if (missing) return
+    Column(modifier.fillMaxWidth()) {
+        OutlinedButton(enabled = !testing, onClick = {
+            testing = true
+            result = null
+            scope.launch {
+                try {
+                    val r = app.call("voice.test")
+                    val ok = r.bool("ok") == true
+                    result = ok to (r.string("message") ?: if (ok) "The voice key works." else "The voice key doesn't work.")
+                } catch (e: RemoteException) {
+                    if (e.isUnknownMethod) missing = true else result = false to e.userMessage()
+                } catch (e: Exception) {
+                    result = false to e.userMessage()
+                }
+                testing = false
+            }
+        }) { Text(if (testing) "Testing…" else "Test voice key") }
+        result?.let { (ok, message) ->
+            val c = statusColors(if (ok) Status.DONE else Status.FAILED)
+            Surface(color = c.container, contentColor = c.content, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                Text(message, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
             }
         }
     }

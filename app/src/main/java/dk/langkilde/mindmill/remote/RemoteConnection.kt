@@ -227,10 +227,12 @@ class RemoteConnection(private val store: PairingStore, private val scope: Corou
                     val (l, host) = opened
                     try {
                         val hello = rpc.call("hello", jsonOf("token" to pairing.token, "platform" to PLATFORM), 10_000)
-                        if (host != pairings.value.find(pairing.fingerprint)?.lastHost) {
-                            save(pairings.value.updated(pairing.fingerprint) { it.copy(lastHost = host) })
-                        }
                         val info = HelloInfo.parse(hello)
+                        val known = pairings.value.find(pairing.fingerprint)
+                        val name = hello.string("name")?.takeIf { it.isNotBlank() } ?: known?.macName
+                        if (known != null && (host != known.lastHost || name != known.macName)) {
+                            save(pairings.value.updated(pairing.fingerprint) { it.copy(lastHost = host, macName = name ?: it.macName) })
+                        }
                         _lastHello.value = info
                         _state.value = m.connected(host, info)
                         l.closed.await()

@@ -63,11 +63,11 @@ object DrawerModel {
 
     /**
      * The mode's sessions for the drawer: every one that needs the user first (newest first), then the [recent] most
-     * recently touched others. Archived ones and Build's overview session stay out.
+     * recently touched others. Archived ones stay out, and so does Build's overview session unless it needs the user.
      */
     fun sessions(all: List<SessionInfo>, mode: Mode, recent: Int = 8): List<SessionInfo> {
         val mine = all.filter { s ->
-            !s.archived && (if (mode == Mode.BUILD) s.space == "build" && s.role != "overseer" else s.space != "build")
+            !s.archived && (if (mode == Mode.BUILD) s.space == "build" && (s.role != "overseer" || s.needsYou) else s.space != "build")
         }.sortedByDescending { it.updated }
         val needs = mine.filter { it.needsYou }
         return needs + mine.filter { !it.needsYou }.take(recent)
@@ -75,7 +75,7 @@ object DrawerModel {
 
     /** How many of the mode's live sessions the drawer leaves out (the Sessions screen has them all). */
     fun hidden(all: List<SessionInfo>, mode: Mode, recent: Int = 8): Int =
-        all.count { !it.archived && (if (mode == Mode.BUILD) it.space == "build" && it.role != "overseer" else it.space != "build") } -
+        all.count { !it.archived && (if (mode == Mode.BUILD) it.space == "build" && (it.role != "overseer" || it.needsYou) else it.space != "build") } -
             sessions(all, mode, recent).size
 }
 

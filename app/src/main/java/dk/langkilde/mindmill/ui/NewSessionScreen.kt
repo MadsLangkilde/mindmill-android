@@ -102,11 +102,12 @@ fun NewSessionScreen(nav: Nav, mode: Mode) {
             if (starting) Loading(Modifier.padding(top = 12.dp), text = "Starting the session…")
         }
         if (liveHere) {
-            LiveBar(app.liveChat, live)
+            LiveTurn(app.liveChat, live)
         }
         Composer(
             placeholder = if (mode == Mode.PLAN) "Ask Mindmill…" else "What should it build or fix?",
             draftKey = "new-${mode.id}",
+            slash = SlashSource(null, app.currentScope),
             onSend = ::start,
             liveHere = liveHere,
             onLive = { startLive { app.liveChat.startNew(mode.id, app.currentScope, assistant = mode == Mode.PLAN) } },

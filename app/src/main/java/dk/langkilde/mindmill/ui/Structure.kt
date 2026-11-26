@@ -163,7 +163,7 @@ fun NavSection.screen(mode: Mode, kbSections: Collection<String> = emptyList()):
     else -> Screen.AllActions(title)
 }
 
-private val KB_SECTIONS = setOf("inbox", "decisions", "facts", "architecture", "ideas", "research", "references")
+private val KB_SECTIONS = setOf("notes", "inbox", "decisions", "facts", "architecture", "ideas", "research", "references")
 
 /** Window widths as Material's size classes: phone, then tablet or unfolded or landscape, then large. */
 enum class WidthClass {
@@ -242,9 +242,11 @@ object SessionGroups {
 
     /**
      * Build sessions by scope, in the order of the Mac's projects, then scopes it doesn't list, then those without
-     * one. A helper goes under its lead when the Mac says which; the overseer stays out of the list.
+     * one. A helper goes under its lead when the Mac says which. The overview session (the overseer) stays out,
+     * except at the top while it needs the user: "Need you" counts it, so it must be findable.
      */
     fun build(all: List<SessionInfo>, scopes: List<Pair<String, String>>): GroupedSessions {
+        val overview = all.filter { it.space == "build" && it.role == "overseer" && !it.archived && it.needsYou }
         val build = all.filter { it.space == "build" && it.role != "overseer" }.sortedByDescending { it.updated }
         val live = build.filter { !it.archived }
         val ids = live.map { it.id }.toSet()
@@ -256,7 +258,8 @@ object SessionGroups {
         (order + top.mapNotNull { it.scope?.takeIf(String::isNotBlank) }.filter { it !in order }.distinct()).forEach { buckets[it] = mutableListOf() }
         buckets[null] = mutableListOf()
         top.forEach { s -> buckets.getValue(s.scope?.takeIf(String::isNotBlank)).add(s) }
-        val groups = buckets.filterValues { it.isNotEmpty() }.map { (scope, list) ->
+        val first = if (overview.isEmpty()) emptyList() else listOf(SessionGroup("overview", "Overview", overview.map { SessionRow(it) }))
+        val groups = first + buckets.filterValues { it.isNotEmpty() }.map { (scope, list) ->
             SessionGroup(
                 scope ?: "-",
                 scope?.let { titles[it] ?: it } ?: "No project",

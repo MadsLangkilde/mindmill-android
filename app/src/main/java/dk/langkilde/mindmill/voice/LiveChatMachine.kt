@@ -339,14 +339,20 @@ class LiveChatMachine(
         }
     }
 
-    /** The user talked over the phone, or tapped stop while it spoke: stop speaking and listen. */
+    /**
+     * The user talked over the phone, or tapped stop while it spoke: stop speaking and listen. Interrupting a reply
+     * skips the rest of that reply; interrupting the acknowledgement or a note doesn't, so the reply is still read.
+     */
     fun bargeIn() {
         if (phase != LivePhase.SPEAKING) return
+        val wasReply = outstanding.any { it.startsWith("reply:") }
         fx.stopSpeaking()
         outstanding.clear()
-        held.clear()
         stopWatch()
-        muted = true
+        if (wasReply) {
+            held.clear()
+            muted = true
+        }
         phase = if (working) LivePhase.WAITING else LivePhase.LISTENING
         listen()
     }

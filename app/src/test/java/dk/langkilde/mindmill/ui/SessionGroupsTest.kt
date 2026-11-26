@@ -91,6 +91,15 @@ class SessionGroupsTest {
         assertEquals(listOf("a1"), g.archived.map { it.id })
     }
 
+    @Test fun theOverviewSessionShowsOnTopOnlyWhileItNeedsYou() {
+        val quiet = listOf(s("o1", space = "build", role = "overseer"), s("w1", space = "build", scope = "web"))
+        assertEquals(listOf("Web"), SessionGroups.build(quiet, listOf("web" to "Web")).groups.map { it.title })
+        val asking = listOf(s("o1", space = "build", role = "overseer", state = "waiting"), s("w1", space = "build", scope = "web"))
+        val g = SessionGroups.build(asking, listOf("web" to "Web"))
+        assertEquals(listOf("Overview", "Web"), g.groups.map { it.title })
+        assertEquals(1, g.groups[0].needsYou)
+    }
+
     @Test fun helperWhoseLeadIsGoneStaysOnTop() {
         val g = SessionGroups.build(listOf(s("h", space = "build", role = "member", lead = "gone", scope = "web")), listOf("web" to "Web"))
         assertEquals(listOf(SessionRow(g.groups.single().rows.single().session, 0)), g.groups.single().rows)

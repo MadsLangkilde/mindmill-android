@@ -64,8 +64,9 @@ fun ProjectsScreen(nav: Nav) {
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(vertical = 4.dp),
                     )
-                    FilledTonalButton(onClick = { nav.go(Screen.ProjectEditor(null)) }, modifier = Modifier.padding(vertical = 6.dp)) {
-                        Text("New project")
+                    ChipFlow(Modifier.padding(vertical = 6.dp)) {
+                        FilledTonalButton(onClick = { nav.go(Screen.ProjectEditor(null)) }) { Text("New project") }
+                        OutlinedButton(onClick = { nav.go(Screen.SharingDefaults()) }) { Text("Private and shared") }
                     }
                     if (cfg.projects.isEmpty()) ListEmptyState("No projects yet. Make one to give sessions their folders.")
                 }

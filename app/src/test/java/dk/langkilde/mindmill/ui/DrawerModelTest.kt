@@ -26,5 +26,7 @@ class DrawerModelTest {
         assertEquals(listOf("old-needs", "p2", "p3"), DrawerModel.sessions(all, Mode.PLAN, recent = 2).map { it.id })
         assertEquals(1, DrawerModel.hidden(all, Mode.PLAN, recent = 2))
         assertEquals(listOf("b2", "b1"), DrawerModel.sessions(all, Mode.BUILD).map { it.id })
+        val asking = all.map { if (it.id == "ov") s("ov", space = "build", updated = 60.0, role = "overseer", needs = true) else it }
+        assertEquals(listOf("ov", "b2", "b1"), DrawerModel.sessions(asking, Mode.BUILD).map { it.id })
     }
 }

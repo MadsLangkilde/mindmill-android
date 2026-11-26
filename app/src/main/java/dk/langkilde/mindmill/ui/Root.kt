@@ -328,7 +328,6 @@ private fun SessionMenu(s: Screen.SessionChat, go: (Screen) -> Unit) {
 @Composable
 private fun TestMenuItems(session: String, scopeId: String?, close: () -> Unit, go: (Screen) -> Unit) {
     val app = LocalApp.current
-    val scope = rememberCoroutineScope()
     val (status, retry) = rememberLoad(session, scopeId) {
         TestTarget.list(app.call("test.status", jsonOf("scope" to scopeId)))
     }
@@ -357,9 +356,7 @@ private fun TestMenuItems(session: String, scopeId: String?, close: () -> Unit, 
                 onClick = {
                     if (why != null) openTest() else {
                         close()
-                        scope.launch {
-                            app.runAndReport("test.deliver", jsonOf("target" to t.id, "scope" to scopeId, "session" to session))
-                        }
+                        app.requestTestBuild(t, scopeId, session)
                     }
                 },
             )
@@ -470,6 +467,9 @@ fun Screen.title(): String = when (this) {
     is Screen.MeetingDetail -> "Meeting"
     Screen.LiveMeeting -> "Meeting on this phone"
     is Screen.Web -> title
+    is Screen.SkillsTools -> "Skills and tools"
+    is Screen.SkillEditor -> name ?: "New skill"
+    is Screen.SharingDefaults -> "Private and shared"
 }
 
 /** Lists whose rows open a detail: on a wide screen the detail opens beside the list. */
@@ -678,5 +678,8 @@ private fun ScreenContent(nav: Nav, screen: Screen) {
         is Screen.MeetingDetail -> MeetingDetailScreen(s.id, s.title)
         Screen.LiveMeeting -> LiveMeetingScreen(nav)
         is Screen.Web -> WebScreen(s.title, s.url, s.preview)
+        is Screen.SkillsTools -> SkillsToolsScreen(nav, s.tab)
+        is Screen.SkillEditor -> SkillEditorScreen(nav, s.name, s.location, s.scope)
+        is Screen.SharingDefaults -> SharingDefaultsScreen(s.scope)
     }
 }

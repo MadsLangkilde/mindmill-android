@@ -24,6 +24,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dk.langkilde.mindmill.remote.EntryIds
+import dk.langkilde.mindmill.remote.NoteText
+import dk.langkilde.mindmill.remote.Sharing
+import dk.langkilde.mindmill.remote.Suggestion
 import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.obj
 import dk.langkilde.mindmill.remote.string
@@ -76,7 +80,7 @@ fun FactsScreen(nav: Nav, startProposed: Boolean, startSection: String = "facts"
             if (!proposed) {
                 SearchField(query, { query = it }, "Search ${sectionTitle(section).lowercase()}", Modifier.padding(top = 4.dp))
                 ChipFlow(Modifier.padding(top = 4.dp)) {
-                    OutlinedButton(onClick = { nav.go(Screen.NewEntry(section)) }) { Text("New") }
+                    OutlinedButton(onClick = { nav.go(Screen.NewEntry(section)) }) { Text(if (section == "notes") "Write a note" else "New") }
                     TextButton(onClick = { nav.go(Screen.Knowledge) }) { Text("Other sections") }
                 }
             }
@@ -84,12 +88,15 @@ fun FactsScreen(nav: Nav, startProposed: Boolean, startSection: String = "facts"
             if (state.value != null && entries.isEmpty()) {
                 if (proposed) EmptyState("No proposed facts are waiting.", detail = "Sessions and meetings propose facts; they show here for your yes or no.")
                 else if (query.isNotBlank()) EmptyState("Nothing matches “$query”.")
+                else if (section == "notes") EmptyState("No notes yet.", "Write a note", { nav.go(Screen.NewEntry(section)) },
+                    detail = "Jot down what doesn't fit anywhere else yet; Mindmill helps sort it later.")
                 else EmptyState("Nothing here yet.", "Add one", { nav.go(Screen.NewEntry(section)) })
             }
         }
         items(entries, key = { it.id }) { e ->
             Column(Modifier.fillMaxWidth()) {
-                ListRow(e.title, subtitle = listOf(e.summary, e.date).filter { it.isNotBlank() }.joinToString(" · "),
+                val status = if (section == "notes" && !proposed) NoteText.statusTitle(e.field("status")) else ""
+                ListRow(e.title, subtitle = listOf(status, e.summary, e.date).filter { it.isNotBlank() }.joinToString(" · "),
                     onClick = { nav.go(Screen.Entry(e.id)) })
                 if (proposed) {
                     e.field("reason")?.let { Text("Why: $it", style = MaterialTheme.typography.bodySmall) }
@@ -123,23 +130,32 @@ fun EntryScreen(nav: Nav, id: String) {
     var summary by rememberSaveable(doc) { mutableStateOf(fm.fm("summary")) }
     var tags by rememberSaveable(doc) { mutableStateOf(fm.fm("tags")) }
     var body by rememberSaveable(doc) { mutableStateOf(doc?.string("body").orEmpty()) }
+    var sharingNow by remember(doc) { mutableStateOf<Sharing?>(null) }
+    val note = EntryIds.section(id) == "notes"
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         LoadStatus(state, retry, skeletonRows = 6)
         if (doc == null) return@Column
         if (!editing) {
-            Text(fm.fm("title").ifBlank { id }, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 6.dp))
+            val heading = fm.fm("title").ifBlank { if (note) "Note" else id }
+            Text(heading, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 6.dp))
             if (fm.fm("summary").isNotBlank()) Text(fm.fm("summary"), style = MaterialTheme.typography.bodyLarge)
             ChipFlow(Modifier.padding(vertical = 8.dp)) {
-                listOf("status", "kind", "owner", "due", "waiting_on", "date").mapNotNull { k ->
+                listOf("status", "kind", "owner", "due", "waiting_on", "date").filter { !(note && it == "status") }.mapNotNull { k ->
                     fm.fm(k).takeIf { it.isNotBlank() }?.let { "${k.replace('_', ' ')}: $it" }
                 }.forEach { InfoChip(it) }
                 fm.strings("tags").forEach { InfoChip("#$it") }
             }
-            OutlinedButton(onClick = { editing = true }) { Text("Edit") }
+            (sharingNow ?: Sharing.parse(doc.obj("sharing")))?.let { s -> SharingRow(id, s) { sharingNow = it } }
+            if (note) NoteActions(nav, id, heading, fm.fm("status").ifBlank { null }, onChanged = retry)
+            OutlinedButton(onClick = { editing = true }, modifier = Modifier.padding(top = 4.dp)) { Text("Edit") }
             androidx.compose.foundation.text.selection.SelectionContainer {
-                Text(markdownish(doc.string("body").orEmpty()), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 12.dp))
+                Text(markdownish(doc.string("body").orEmpty()),
+                    style = if (note) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(vertical = 12.dp))
             }
+            SuggestionCards(Suggestion.list(doc), onChanged = retry,
+                title = if (note) "Where its parts could go" else "Suggested from this")
             val linked = doc.obj("extra")?.let { EntrySummary.list(it, "linked") }.orEmpty()
             if (linked.isNotEmpty()) {
                 SectionTitle("Linked facts")
@@ -303,6 +319,8 @@ fun MoreScreen(nav: Nav) {
         ),
         "Set-up" to listOf(
             MoreRow("Projects", "The Mac's projects: their folders and scopes", "projects", Screen.Projects),
+            MoreRow("Private and shared", "Which kinds of entries go into the project's repository", "sharing", Screen.SharingDefaults()),
+            MoreRow("Skills and tools", "The AI's skills, plugins and tools", "skills", Screen.SkillsTools()),
             MoreRow("Connection", "Your Macs, switching between them, voice options, colours", "connection", Screen.Connection),
         ),
     ).map { (t, rows) -> t to rows.filter { it.screen !in shown } }.filter { it.second.isNotEmpty() }

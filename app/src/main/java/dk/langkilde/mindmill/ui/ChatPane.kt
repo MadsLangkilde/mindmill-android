@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -61,6 +62,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -76,12 +79,17 @@ import dk.langkilde.mindmill.remote.ChoiceOption
 import dk.langkilde.mindmill.remote.ConnectionState
 import dk.langkilde.mindmill.remote.ReplyPart
 import dk.langkilde.mindmill.remote.ReplyParts
+import dk.langkilde.mindmill.remote.SkillInfo
+import dk.langkilde.mindmill.remote.SlashSkills
 import dk.langkilde.mindmill.remote.ToolSteps
 import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.text
 import dk.langkilde.mindmill.remote.userMessage
 import dk.langkilde.mindmill.voice.ContinuousRecognizer
 import dk.langkilde.mindmill.voice.LiveChat
+import dk.langkilde.mindmill.voice.VoiceConfig
+import dk.langkilde.mindmill.voice.VoiceUi
+import dk.langkilde.mindmill.voice.VoiceConversation
 import dk.langkilde.mindmill.voice.LivePhase
 import dk.langkilde.mindmill.voice.LiveUi
 import kotlinx.coroutines.launch
@@ -170,9 +178,25 @@ fun rememberLiveStarter(): (() -> Unit) -> Unit {
     }
 }
 
+/** Where the message box's slash list comes from: a session's skills, or (no session yet) a scope's. */
+data class SlashSource(val session: String?, val scope: String?)
+
+/** The skills for [source] (`skills.list`, cached in the app), loaded once a slash is typed and again on `skills.changed`. */
+@Composable
+private fun rememberSlashSkills(source: SlashSource?, wanted: Boolean): List<SkillInfo> {
+    val app = LocalApp.current
+    val version by app.skillsVersion.collectAsState()
+    var skills by remember(source) { mutableStateOf(emptyList<SkillInfo>()) }
+    LaunchedEffect(source, version, wanted) {
+        if (source != null && wanted) skills = runCatching { app.skillsFor(source.session, source.scope) }.getOrDefault(emptyList())
+    }
+    return skills
+}
+
 /**
  * The one message box of every session and of a new one. Empty, its button starts live chat (talking, with the reply
- * read aloud); with text, it sends. While live chat runs here the button ends it.
+ * read aloud); with text, it sends. While live chat runs here the button ends it. Typing `/` lists the skills of
+ * [slash] above it, in the layout; picking one puts its command in the box.
  */
 @Composable
 fun Composer(
@@ -183,18 +207,43 @@ fun Composer(
     modifier: Modifier = Modifier,
     placeholder: String = "Message",
     draftKey: String = "",
+    slash: SlashSource? = null,
 ) {
-    var draft by rememberSaveable(draftKey) { mutableStateOf("") }
-    Row(modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    var draft by rememberSaveable(draftKey, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue("")) }
+    val query = SlashSkills.query(draft.text)
+    val skills = rememberSlashSkills(slash, wanted = query != null)
+    val matches = remember(skills, query) { if (query == null) emptyList() else SlashSkills.matches(skills, query) }
+    Column(modifier.fillMaxWidth()) {
+        if (matches.isNotEmpty()) {
+            SlashList(matches) { s ->
+                val text = SlashSkills.insert(s)
+                draft = TextFieldValue(text, TextRange(text.length))
+            }
+        }
+        ComposerRow(draft, { draft = it }, placeholder, onSend, liveHere, onLive, onEndLive)
+    }
+}
+
+@Composable
+private fun ComposerRow(
+    draft: TextFieldValue,
+    setDraft: (TextFieldValue) -> Unit,
+    placeholder: String,
+    onSend: (String) -> Unit,
+    liveHere: Boolean,
+    onLive: () -> Unit,
+    onEndLive: () -> Unit,
+) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
-            draft, { draft = it }, placeholder = { Text(placeholder) },
+            draft, setDraft, placeholder = { Text(placeholder) },
             modifier = Modifier.weight(1f), maxLines = 6, shape = RoundedCornerShape(20.dp),
         )
         Box(Modifier.padding(start = 6.dp)) {
             when {
-                draft.isNotBlank() -> FilledIconButton(onClick = {
-                    val text = draft.trim()
-                    draft = ""
+                draft.text.isNotBlank() -> FilledIconButton(onClick = {
+                    val text = draft.text.trim()
+                    setDraft(TextFieldValue(""))
                     onSend(text)
                 }) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send") }
                 liveHere -> FilledIconButton(
@@ -209,52 +258,111 @@ fun Composer(
     }
 }
 
-/**
- * What live chat is doing, in the layout above the message box: what it heard so far (sent when the user pauses),
- * and the buttons that fit the moment.
- */
+/** The skills matching what follows the slash, right above the message box: it scrolls, and never covers the box. */
 @Composable
-fun LiveBar(live: LiveChat, ui: LiveUi) {
+private fun SlashList(skills: List<SkillInfo>, onPick: (SkillInfo) -> Unit) {
     val cs = MaterialTheme.colorScheme
-    ui.notice?.let { NoticeBar(it, Modifier.padding(top = 4.dp), error = true, onDismiss = { live.dismissNotice() }) }
-    Surface(
-        color = cs.primaryContainer, contentColor = cs.onPrimaryContainer, shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-    ) {
-        Column(Modifier.padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
-                Text(
-                    liveStatus(ui),
-                    style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(start = 8.dp).weight(1f),
-                )
-                TextButton(onClick = { live.end() }) { Text("End") }
-            }
-            val heard = listOf(ui.draft, ui.partial).filter { it.isNotBlank() }.joinToString(" ")
-            if (heard.isNotEmpty()) {
-                Text(heard, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 2.dp, bottom = 4.dp, end = 8.dp))
-            }
-            val speaking = ui.phase == LivePhase.SPEAKING
-            if (speaking || ui.working || heard.isNotEmpty()) {
-                ChipFlow {
-                    if (heard.isNotEmpty()) {
-                        TextButton(onClick = { live.sendHeard() }) { Text("Send now") }
-                        if (ui.draft.isNotEmpty()) TextButton(onClick = { live.clearHeard() }) { Text("Clear") }
+    Surface(color = cs.surfaceContainerHigh, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 232.dp)) {
+            items(skills, key = { it.command }) { s ->
+                Column(
+                    Modifier.fillMaxWidth().clickable(onClickLabel = "Use ${s.command}") { onPick(s) }
+                        .heightIn(min = 48.dp).padding(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(s.command, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
+                        Text(s.sourceLabel, style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
                     }
-                    if (speaking) TextButton(onClick = { live.stopSpeaking() }) { Text("Stop talking") }
-                    if (ui.working) TextButton(onClick = { live.stopWork() }) { Text("Stop Claude") }
+                    if (s.description.isNotBlank()) {
+                        Text(s.description, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+                    }
                 }
             }
         }
     }
 }
 
-private fun liveStatus(ui: LiveUi): String = when (ui.phase) {
-    LivePhase.LISTENING -> if (ui.draft.isNotEmpty()) "Listening. Sends when you pause." else "Listening…"
-    LivePhase.WAITING -> if (ui.working) "Working on it. Keep talking to add more, or say “stop”." else "Listening…"
-    LivePhase.SPEAKING -> "Speaking. Talk to interrupt."
-    LivePhase.PAUSED -> "Paused while another app has the audio"
-    LivePhase.IDLE -> "Starting…"
+/**
+ * Live chat inside the conversation: what is heard so far shows as the next message of yours, with "Listening…",
+ * and goes once it is sent; while Claude works or a reply is read out, a quiet line says how to stop it. A problem
+ * shows as a notice. Ending live chat is the message box's stop button.
+ */
+@Composable
+fun LiveTurn(live: LiveChat, ui: LiveUi) {
+    val cs = MaterialTheme.colorScheme
+    val heard = listOf(ui.draft, ui.partial).filter { it.isNotBlank() }.joinToString(" ")
+    Column(Modifier.fillMaxWidth()) {
+        ui.notice?.let { NoticeBar(it, Modifier.padding(bottom = 4.dp), error = true, onDismiss = { live.dismissNotice() }) }
+        when {
+            heard.isNotEmpty() -> Box(Modifier.fillMaxWidth(), contentAlignment = BiasAlignment(1f, 0f)) {
+                Surface(color = cs.primaryContainer, shape = RoundedCornerShape(14.dp), modifier = Modifier.padding(start = 40.dp)) {
+                    Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 2.dp)) {
+                        Text(heard, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(end = 8.dp))
+                        ChipFlow {
+                            LiveLabel(if (ui.partial.isBlank()) "Sends when you pause" else "Listening…", cs.onPrimaryContainer)
+                            TextButton(onClick = { live.sendHeard() }) { Text("Send now") }
+                            if (ui.draft.isNotEmpty()) TextButton(onClick = { live.clearHeard() }) { Text("Clear") }
+                        }
+                    }
+                }
+            }
+            ui.phase == LivePhase.SPEAKING -> LiveLine("Reading the reply. Talk to interrupt.", "Stop reading") { live.stopSpeaking() }
+            ui.working -> LiveLine("Say “stop” to stop it, or keep talking to add more.", "Stop") { live.stopWork() }
+            ui.phase == LivePhase.LISTENING -> Box(Modifier.fillMaxWidth(), contentAlignment = BiasAlignment(1f, 0f)) {
+                LiveLabel("Listening… · ${VoiceConfig.ON_PHONE}", cs.primary)
+            }
+            ui.phase == LivePhase.PAUSED -> LiveLine("Paused while another app has the audio.")
+            else -> LiveLine("Starting…")
+        }
+    }
+}
+
+/**
+ * Live voice in the session through the Mac's voice API: what the voice model hears shows as your next message with
+ * "Listening…"; while it speaks, a line to stop it. Which voice it is shows while it listens.
+ */
+@Composable
+fun ApiLiveTurn(voice: VoiceConversation, ui: VoiceUi) {
+    val cs = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth()) {
+        ui.notice?.let { NoticeBar(it, Modifier.padding(bottom = 4.dp), error = true, onDismiss = { voice.dismissNotice() }) }
+        val phase = ui.phase.lowercase()
+        when {
+            ui.starting -> LiveLine("Starting ${ui.engineLabel.takeIf { it.isNotBlank() } ?: "the voice"}…")
+            ui.partial.isNotBlank() -> Box(Modifier.fillMaxWidth(), contentAlignment = BiasAlignment(1f, 0f)) {
+                Surface(color = cs.primaryContainer, shape = RoundedCornerShape(14.dp), modifier = Modifier.padding(start = 40.dp)) {
+                    Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 2.dp)) {
+                        Text(ui.partial, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(end = 8.dp))
+                        LiveLabel("Listening…", cs.onPrimaryContainer)
+                    }
+                }
+            }
+            phase.startsWith("speaking") -> LiveLine("Speaking. Talk to interrupt.", "Stop") { voice.stopSpeaking() }
+            phase.startsWith("thinking") -> Unit
+            ui.paused -> LiveLine("Paused while another app has the audio.")
+            else -> Box(Modifier.fillMaxWidth(), contentAlignment = BiasAlignment(1f, 0f)) {
+                LiveLabel("Listening… · ${ui.engineLabel}", cs.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveLabel(text: String, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 40.dp).padding(end = 8.dp)) {
+        Icon(Icons.Default.GraphicEq, contentDescription = null, tint = color, modifier = Modifier.size(16.dp))
+        Text(text, style = MaterialTheme.typography.labelMedium, color = color, modifier = Modifier.padding(start = 6.dp))
+    }
+}
+
+@Composable
+private fun LiveLine(text: String, action: String? = null, onAction: () -> Unit = {}) {
+    ChipFlow(Modifier.fillMaxWidth()) {
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.heightIn(min = 40.dp).wrapContentHeight(Alignment.CenterVertically))
+        if (action != null) TextButton(onClick = onAction) { Text(action) }
+    }
 }
 
 /**
@@ -320,6 +428,7 @@ fun ChatPane(
     }
     val items = remember(version) { log.items }
     val rows = remember(version) { ChatRows.group(items) }
+    val suggestions = remember(version) { log.suggestions }
     val active = remember(version) { ReplyParts.activeIndex(items, log.busy) }
     val lastIsSteps = rows.lastOrNull() is ChatRow.Steps
     // Opening a session lands at the end at once; only what arrives afterwards glides into view.
@@ -332,7 +441,13 @@ fun ChatPane(
         else listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
         shownCount = items.size
     }
-    val liveHere = live.active && live.session == id
+    val voiceUi by app.voice.ui.collectAsState()
+    val apiHere = (voiceUi.active || voiceUi.starting) && voiceUi.session == id
+    val liveHere = (live.active && live.session == id) || apiHere
+    val liveHeard = live.draft.isNotEmpty() || live.partial.isNotEmpty() || voiceUi.partial.isNotEmpty()
+    LaunchedEffect(liveHere, liveHeard, live.phase, voiceUi.phase) {
+        if (liveHere) listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
+    }
 
     Column(modifier.fillMaxSize()) {
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -349,6 +464,11 @@ fun ChatPane(
                     }
                 }
             }
+            if (suggestions.isNotEmpty()) {
+                item(key = "suggestions") { SuggestionCards(suggestions, onChanged = { scope.launch { fetch() } }) }
+            }
+            if (apiHere) item(key = "live") { ApiLiveTurn(app.voice, voiceUi) }
+            else if (liveHere) item(key = "live") { LiveTurn(app.liveChat, live) }
             if (log.busy && !lastIsSteps) {
                 item(key = "working") {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
@@ -360,15 +480,12 @@ fun ChatPane(
         }
         problem?.let { ErrorState(it, onRetry = { scope.launch { fetch() } }, compact = true) }
         if (log.state == "blocked" && !log.busy) PermissionCard(id, log.denials)
-        if (liveHere) {
-            LiveBar(app.liveChat, live)
-        }
         Composer(
-            placeholder = placeholder, draftKey = id,
+            placeholder = placeholder, draftKey = id, slash = SlashSource(id, null),
             onSend = ::send,
             liveHere = liveHere,
-            onLive = { startLive { app.liveChat.startInSession(id) } },
-            onEndLive = { app.liveChat.end() },
+            onLive = { startLive { app.startLive(id) } },
+            onEndLive = { app.endLive() },
         )
     }
 }

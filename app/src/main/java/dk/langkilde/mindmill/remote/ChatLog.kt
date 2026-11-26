@@ -28,6 +28,9 @@ class ChatLog {
     /** What Claude was refused in its last turn (`state` blocked), when the Mac says. */
     var denials: List<String> = emptyList()
         private set
+    /** What the session suggests adding to the knowledge base, waiting for the user. */
+    var suggestions: List<Suggestion> = emptyList()
+        private set
 
     /** What to pass as `since` next. */
     val since get() = confirmed.size
@@ -46,6 +49,7 @@ class ChatLog {
             space = s.string("space").orEmpty()
         }
         denials = result.strings("denials")
+        suggestions = Suggestion.list(result)
         if (askedSince > 0 && total != null && total < askedSince) return true
         val fresh = result.objects("items").map { ChatItem(it.string("role") ?: "status", it.string("text").orEmpty()) }
         confirmed = if (askedSince == 0) fresh else confirmed.take(askedSince) + fresh
@@ -75,5 +79,6 @@ class ChatLog {
         scope = null
         space = ""
         denials = emptyList()
+        suggestions = emptyList()
     }
 }

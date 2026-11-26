@@ -88,6 +88,7 @@ fun RelatedActions(nav: Nav, prefix: String, defaults: Map<String, String> = emp
 }
 
 private val knowledgeSections = listOf(
+    "notes" to "Your notes that don't fit anywhere else yet",
     "facts" to "What's true about the project, confirmed",
     "decisions" to "What was decided, and why",
     "architecture" to "How it is built",
@@ -150,6 +151,10 @@ fun KnowledgeScreen(nav: Nav) {
 
 @Composable
 fun NewEntryScreen(nav: Nav, section: String) {
+    if (section == "notes") {
+        NewNoteScreen(nav)
+        return
+    }
     val app = LocalApp.current
     val scope = rememberCoroutineScope()
     var title by rememberSaveable { mutableStateOf("") }

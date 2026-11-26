@@ -19,8 +19,11 @@ import java.util.Locale
 /** The Mac side of a conversation: `voice.*` methods. */
 interface VoiceRemote {
     suspend fun config(): VoiceConfig
-    /** Returns the conversation id and the engine the Mac picked (null when it didn't say). */
-    suspend fun start(scope: String?, forceKeyless: Boolean): Pair<String, VoiceEngine?>
+    /**
+     * Returns the conversation id and the engine the Mac picked (null when it didn't say). With [session], live voice
+     * in that work session through the voice API (fails when the Mac has none).
+     */
+    suspend fun start(scope: String?, forceKeyless: Boolean, session: String? = null): Pair<String, VoiceEngine?>
     suspend fun say(conversation: String, text: String): String?
     suspend fun interrupt(conversation: String)
     suspend fun end(conversation: String)
@@ -80,7 +83,7 @@ data class VoiceUi(
     val active: Boolean = false,
     val starting: Boolean = false,
     val engine: VoiceEngine = VoiceEngine.KEYLESS,
-    val engineLabel: String = "On this phone",
+    val engineLabel: String = VoiceConfig.ON_PHONE,
     val phase: String = "Not talking",
     val partial: String = "",
     val bubbles: List<Bubble> = emptyList(),
@@ -88,6 +91,8 @@ data class VoiceUi(
     val notice: String? = null,
     val conversation: String? = null,
     val paused: Boolean = false,
+    /** Live voice in this work session: the voice API talks, the session works. */
+    val session: String? = null,
 )
 
 /**
@@ -114,6 +119,9 @@ class VoiceConversation(
     private var seq = 0L
     private val replies = mutableMapOf<String, StringBuilder>()
 
+    /** Live voice in a session lost its voice API: the app carries on with on-phone live chat in [String]. */
+    var onSessionFallback: ((String) -> Unit)? = null
+
     val machine = KeylessVoiceMachine(object : KeylessEffects {
         override fun startListening() = device.startListening()
         override fun stopListening() = device.stopListening()
@@ -129,17 +137,17 @@ class VoiceConversation(
         device.events = this
     }
 
-    suspend fun begin(scopeId: String?, keylessOnly: Boolean) {
+    suspend fun begin(scopeId: String?, keylessOnly: Boolean, session: String? = null) {
         if (_ui.value.active || _ui.value.starting) return
-        _ui.value = VoiceUi(starting = true, phase = "Starting…")
+        _ui.value = VoiceUi(starting = true, phase = "Starting…", session = session)
         try {
             config = remote.config()
-            val (conv, picked) = remote.start(scopeId, forceKeyless = keylessOnly)
+            val (conv, picked) = remote.start(scopeId, forceKeyless = keylessOnly, session = session)
             conversation = conv
             engine = if (keylessOnly) VoiceEngine.KEYLESS else picked ?: config.engine
             device.configure(config.rate, config.locale(), config.voice)
             device.begin()
-            _ui.value = VoiceUi(active = true, engine = engine, engineLabel = engineLabel(), conversation = conv)
+            _ui.value = VoiceUi(active = true, engine = engine, engineLabel = engineLabel(), conversation = conv, session = session)
             when (engine) {
                 VoiceEngine.API -> startApi(conv)
                 VoiceEngine.KEYLESS -> machine.start()
@@ -209,7 +217,9 @@ class VoiceConversation(
                 val role = data.string("role") ?: "assistant"
                 val text = data.string("text") ?: return
                 val final = data.bool("final") ?: true
-                _ui.update { u ->
+                if (role == "user" && !final) {
+                    _ui.update { it.copy(partial = text) }
+                } else _ui.update { u ->
                     val last = u.bubbles.lastOrNull()
                     val list = if (last != null && last.role == role && !last.final) u.bubbles.dropLast(1) else u.bubbles
                     u.copy(bubbles = list + Bubble(role, text, final), partial = "")
@@ -260,10 +270,20 @@ class VoiceConversation(
 
     fun dismissNotice() = _ui.update { it.copy(notice = null) }
 
+    /** The Mac's voice settings changed (`voice.changed`): the next conversation uses them; one going on keeps its engine. */
+    fun configChanged(c: VoiceConfig) {
+        if (conversation == null) config = c
+    }
+
     fun dropCard(card: VoiceActionCard) = _ui.update { it.copy(cards = it.cards - card) }
 
     private fun fallBack(speech: String, reason: String?) {
         if (conversation == null) return
+        _ui.value.session?.let { id ->
+            end()
+            onSessionFallback?.invoke(id)
+            return
+        }
         if (engine == VoiceEngine.API) {
             apiAudio.stopStreaming()
             apiAudio.clear()
@@ -306,8 +326,8 @@ class VoiceConversation(
     }
 
     private fun engineLabel() = when (engine) {
-        VoiceEngine.KEYLESS -> "On this phone"
-        VoiceEngine.API -> "${config.providerName ?: config.provider ?: "Voice API"} via the Mac"
+        VoiceEngine.KEYLESS -> VoiceConfig.ON_PHONE
+        VoiceEngine.API -> config.apiLabel
     }
 
     private fun phaseTitle(s: KeylessState) = when (s) {
