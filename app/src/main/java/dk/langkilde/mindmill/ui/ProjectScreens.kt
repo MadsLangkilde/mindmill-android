@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderSpecial
@@ -52,12 +53,16 @@ import kotlinx.coroutines.launch
 fun ProjectsScreen(nav: Nav) {
     val app = LocalApp.current
     val (state, retry) = rememberLoad { ProjectsConfig.parse(app.call("projects.config.get")) }
+    val instance = rememberOpenInstance()
     RefreshList(state.refreshing, retry) {
         item(key = "head") {
             Column {
                 LoadStatus(state, retry)
                 val cfg = state.value
                 if (cfg != null) {
+                    instance?.let {
+                        Text("Instance: ${it.name}", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 4.dp))
+                    }
                     Text(
                         "A project has locations, the folders on the Mac its code is in, and scopes: one for the whole project " +
                             "and one per app or part." + (cfg.scopeTitle(cfg.current)?.let { " Current on the Mac: $it." } ?: ""),
@@ -67,6 +72,7 @@ fun ProjectsScreen(nav: Nav) {
                     ChipFlow(Modifier.padding(vertical = 6.dp)) {
                         FilledTonalButton(onClick = { nav.go(Screen.ProjectEditor(null)) }) { Text("New project") }
                         OutlinedButton(onClick = { nav.go(Screen.SharingDefaults()) }) { Text("Private and shared") }
+                        if (instance != null) OutlinedButton(onClick = { nav.go(Screen.Instances) }) { Text("Instances") }
                     }
                     if (cfg.projects.isEmpty()) ListEmptyState("No projects yet. Make one to give sessions their folders.")
                 }
@@ -110,7 +116,7 @@ private fun ProjectCard(p: ProjectInfo, current: String?, onOpen: () -> Unit) {
     }
 }
 
-private fun plural(n: Int, word: String) = "$n $word" + if (n == 1) "" else "s"
+internal fun plural(n: Int, word: String) = "$n $word" + if (n == 1) "" else "s"
 
 /**
  * Makes or changes a project: its title, its locations (folders picked on the Mac with `folders.list`, each named),
@@ -151,6 +157,10 @@ fun ProjectEditorScreen(nav: Nav, id: String?) {
     var showLocal by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf(false) }
     var confirmDeletes by remember { mutableStateOf<List<ProjectScope>>(emptyList()) }
+    val (instancesState, _) = rememberLoad(id) {
+        if (id != null) null else try { app.instances() } catch (_: RemoteException) { null }
+    }
+    val instances = instancesState.value?.takeIf { it.hasChoice }
 
     fun save(d: ProjectDraft) {
         saving = true
@@ -159,7 +169,14 @@ fun ProjectEditorScreen(nav: Nav, id: String?) {
         scope.launch {
             try {
                 app.call("projects.config.save", d.forSave())
-                app.done(if (d.isNew) "Created ${d.title.trim()}." else "Saved ${d.title.trim()}.")
+                val elsewhere = d.instance?.let { instances?.find(it)?.name ?: "the other instance" }
+                app.done(
+                    when {
+                        elsewhere != null -> "Created ${d.title.trim()} in $elsewhere. It shows here once $elsewhere is open."
+                        d.isNew -> "Created ${d.title.trim()}."
+                        else -> "Saved ${d.title.trim()}."
+                    },
+                )
                 runCatching { app.connection.refreshState() }
                 app.bumpRefresh()
                 nav.back()
@@ -212,6 +229,20 @@ fun ProjectEditorScreen(nav: Nav, id: String?) {
         } else {
             Text("Id: ${d.id}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp))
+        }
+        if (d.isNew && instances != null) {
+            ChoiceField(
+                "Instance", d.instance ?: instances.current.orEmpty(),
+                instances.instances.map { it.id to if (it.id == instances.current) "${it.name} (open)" else it.name },
+                Modifier.padding(top = 4.dp),
+            ) { set(d.withInstance(it, instances.current)) }
+            if (d.elsewhere) {
+                Text(
+                    "It goes into ${instances.find(d.instance)?.name ?: "that instance"} and shows in Projects once that instance is open.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            }
         }
 
         SectionCard("Locations") {
@@ -342,7 +373,11 @@ private fun ScopeEditor(d: ProjectDraft, s: ProjectScope, cfg: ProjectsConfig, s
         Text("Reads knowledge from", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 6.dp))
         val readable = d.readable(s.key, cfg.allScopes)
         if (readable.isEmpty()) {
-            Text("No other saved scopes yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                if (d.elsewhere) "The open instance's scopes can't be read from another instance. Set this up once it is open."
+                else "No other saved scopes yet.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         ChipFlow(Modifier.padding(vertical = 4.dp)) {
             readable.forEach { r ->
@@ -353,27 +388,91 @@ private fun ScopeEditor(d: ProjectDraft, s: ProjectScope, cfg: ProjectsConfig, s
     }
 }
 
-/** Browses the Mac's folders under its home folder (`folders.list`) and picks one. */
+/**
+ * Browses the Mac's folders under its home folder (`folders.list`) and picks one. "New folder" makes one in the folder
+ * shown (`folders.create`) and goes into it; the Mac's `bad_params` message shows as it is.
+ */
 @Composable
-private fun FolderPickerDialog(onPick: (path: String, repository: Boolean) -> Unit, onDismiss: () -> Unit) {
+internal fun FolderPickerDialog(
+    onPick: (path: String, repository: Boolean) -> Unit,
+    onDismiss: () -> Unit,
+    title: String = "Choose a folder",
+) {
     val app = LocalApp.current
+    val ui = rememberCoroutineScope()
     var path by remember { mutableStateOf<String?>(null) }
     var repository by remember { mutableStateOf(false) }
+    var naming by remember { mutableStateOf<String?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    var createProblem by remember { mutableStateOf<String?>(null) }
     val (state, retry) = rememberLoad(path) { FolderListing.parse(app.call("folders.list", jsonOf("path" to path))) }
     val listing = state.value
+
+    fun enter(p: String?, repo: Boolean) {
+        path = p
+        repository = repo
+        naming = null
+        createProblem = null
+    }
+
+    fun create(parent: String, name: String) {
+        creating = true
+        createProblem = null
+        ui.launch {
+            try {
+                val made = FolderListing.created(app.call("folders.create", FolderListing.createParams(parent, name)))
+                if (made != null) enter(made.path, made.repository) else retry()
+            } catch (e: RemoteException) {
+                createProblem = if (e.code == ErrorCodes.BAD_PARAMS) {
+                    e.message?.takeIf { it.isNotBlank() } ?: "The Mac can't make a folder with that name."
+                } else {
+                    e.userMessage()
+                }
+            } catch (e: Exception) {
+                createProblem = e.userMessage()
+            } finally {
+                creating = false
+            }
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Choose a folder") },
+        title = { Text(title) },
         text = {
             Column {
                 Text(listing?.path ?: path ?: "~", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LoadStatus(state, retry, skeletonRows = 3)
                 if (listing != null) {
+                    val name = naming
+                    if (name == null) {
+                        TextButton(onClick = { naming = ""; createProblem = null }) {
+                            Icon(Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
+                            Text("New folder in ${listing.name}")
+                        }
+                    } else {
+                        Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                            OutlinedTextField(
+                                name, { naming = it; createProblem = null }, label = { Text("New folder's name") }, singleLine = true,
+                                isError = createProblem != null, modifier = Modifier.fillMaxWidth(),
+                            )
+                            createProblem?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(top = 4.dp))
+                            }
+                            ChipFlow(Modifier.padding(top = 4.dp)) {
+                                FilledTonalButton(enabled = name.isNotBlank() && !creating, onClick = { create(listing.path, name) }) {
+                                    Text(if (creating) "Making…" else "Make folder")
+                                }
+                                TextButton(onClick = { naming = null; createProblem = null }) { Text("Cancel") }
+                            }
+                        }
+                    }
                     LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
                         listing.parent?.let { parent ->
                             item(key = "up") {
                                 ListRow(
-                                    "Up", subtitle = parent, onClick = { path = parent; repository = false },
+                                    "Up", subtitle = parent, onClick = { enter(parent, false) },
                                     leading = { Icon(Icons.Default.ArrowUpward, contentDescription = null) },
                                 )
                             }
@@ -382,7 +481,7 @@ private fun FolderPickerDialog(onPick: (path: String, repository: Boolean) -> Un
                         items(listing.folders, key = { it.path }) { f ->
                             ListRow(
                                 f.name, subtitle = if (f.repository) "Git repository" else null,
-                                onClick = { path = f.path; repository = f.repository },
+                                onClick = { enter(f.path, f.repository) },
                                 leading = { Icon(if (f.repository) Icons.Default.FolderSpecial else Icons.Default.Folder, contentDescription = null) },
                             )
                         }

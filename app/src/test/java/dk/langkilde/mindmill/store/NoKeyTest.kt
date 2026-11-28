@@ -35,7 +35,7 @@ class NoKeyTest {
         val kv = MemoryKv()
         val cipher = XorCipher()
         val store = PairingStore(kv, cipher)
-        val mac = StoredPairing("Mac", listOf("192.168.1.5", "mac.local"), 7878, "ab".repeat(32), "device-token", "mac.local", "proj")
+        val mac = StoredPairing("Mac", listOf("192.168.1.5", "mac.local"), 7878, "ab".repeat(32), "device-token", "mac.local", "proj", 7879)
         store.savePairings(Pairings().paired(mac))
         store.saveSettings(AppSettings(keylessOnly = true))
 

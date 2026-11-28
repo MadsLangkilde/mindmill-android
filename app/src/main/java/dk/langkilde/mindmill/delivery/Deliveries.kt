@@ -14,6 +14,7 @@ import dk.langkilde.mindmill.MindmillApp
 import dk.langkilde.mindmill.remote.BinaryFrame
 import dk.langkilde.mindmill.remote.RemoteException
 import dk.langkilde.mindmill.remote.RpcChannel
+import dk.langkilde.mindmill.remote.bool
 import dk.langkilde.mindmill.remote.int
 import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.long
@@ -47,6 +48,10 @@ data class Delivery(
     /** building, ready, sent, installed or failed; null from a Mac that doesn't say. */
     val state: String? = null,
     val message: String? = null,
+    /** `test.log` has what the build printed. */
+    val hasLog: Boolean = false,
+    /** The Build session whose version was built; null for the Mac's own copy. */
+    val session: String? = null,
 ) {
     val isBuilding get() = state == "building"
     val hasFailed get() = state == "failed"
@@ -60,6 +65,7 @@ data class Delivery(
                 id = id, scope = o.string("scope"), target = o.string("target"), kind = o.string("kind") ?: "url",
                 title = o.string("title") ?: "Delivery", url = o.string("url"), size = o.long("size"),
                 state = o.string("state"), message = o.string("message"),
+                hasLog = o.bool("hasLog") == true, session = o.text("session")?.takeIf { it.isNotBlank() },
             )
         }
 

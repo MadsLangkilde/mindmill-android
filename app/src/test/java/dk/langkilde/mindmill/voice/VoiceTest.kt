@@ -285,6 +285,21 @@ class EngineSelectionTest {
     }
 
     @Test
+    fun fallbackShowsTheMacsMessageElseASentenceForTheReason() = runTest(UnconfinedTestDispatcher()) {
+        val (c, _, _) = conversation(VoiceConfig(engine = VoiceEngine.API), VoiceEngine.API)
+        c.begin(null, keylessOnly = false)
+        c.onEvent("voice.fallback", jsonOf("conversation" to "conv1", "reason" to "keyLocked", "speech" to "x",
+            "message" to "The Mac couldn't read the Gemini key. Enter your login password on the Mac."))
+        assertEquals("The Mac couldn't read the Gemini key. Enter your login password on the Mac.", c.ui.value.notice)
+
+        val (d, _, _) = conversation(VoiceConfig(engine = VoiceEngine.API), VoiceEngine.API)
+        d.begin(null, keylessOnly = false)
+        d.onEvent("voice.fallback", jsonOf("conversation" to "conv1", "reason" to "quota", "speech" to "x"))
+        assertEquals(VoiceConversation.fallbackNotice("quota", null), d.ui.value.notice)
+        assertFalse(d.ui.value.notice!!.contains("Switched to on-phone voice"))
+    }
+
+    @Test
     fun keylessTurnEndToEndWithBargeIn() = runTest(UnconfinedTestDispatcher()) {
         val (c, remote, hw) = conversation(VoiceConfig(language = "da-DK"), VoiceEngine.KEYLESS)
         val device = hw.first

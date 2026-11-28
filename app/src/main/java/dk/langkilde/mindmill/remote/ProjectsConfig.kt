@@ -89,11 +89,19 @@ data class FolderListing(val path: String, val parent: String?, val folders: Lis
         fun parse(o: JsonObject): FolderListing = FolderListing(
             path = o.text("path") ?: "~",
             parent = o.text("parent")?.takeIf { it.isNotBlank() },
-            folders = o.objects("folders").mapNotNull { f ->
-                val path = f.text("path")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                Folder(f.string("name") ?: ProjectLocation.lastSegment(path), path, f.bool("repository") == true)
-            },
+            folders = o.objects("folders").mapNotNull(::folder),
         )
+
+        /** What `folders.create` answers: the new, empty folder. */
+        fun created(o: JsonObject): Folder? = o.obj("folder")?.let(::folder)
+
+        /** `folders.create`: a folder called [name] in [parent]. */
+        fun createParams(parent: String, name: String): JsonObject = jsonOf("parent" to parent, "name" to name.trim())
+
+        private fun folder(f: JsonObject): Folder? {
+            val path = f.text("path")?.takeIf { it.isNotBlank() } ?: return null
+            return Folder(f.string("name") ?: ProjectLocation.lastSegment(path), path, f.bool("repository") == true)
+        }
     }
 }
 
@@ -109,9 +117,14 @@ data class ProjectDraft(
     val newId: String = "",
     val locations: List<ProjectLocation> = emptyList(),
     val scopes: List<ProjectScope> = emptyList(),
+    /** A new project goes into this instance on the Mac instead of the open one; null: the open one. */
+    val instance: String? = null,
     private val nextKey: Int = 1,
 ) {
     val isNew get() = id == null
+
+    /** A new project for another instance than the open one, whose scopes the open instance's can't be. */
+    val elsewhere get() = isNew && instance != null
 
     val wideScope: ProjectScope? get() = scopes.firstOrNull { it.wide }
 
@@ -119,6 +132,16 @@ data class ProjectDraft(
 
     fun withTitle(t: String) = copy(title = t)
     fun withNewId(t: String) = copy(newId = t)
+
+    /**
+     * Puts a new project into the instance [id] ([open] is the open one's id). Another instance's project can't read
+     * the open instance's scopes, so those are dropped.
+     */
+    fun withInstance(id: String?, open: String?): ProjectDraft {
+        if (!isNew) return this
+        val other = id?.takeIf { it != open }
+        return copy(instance = other, scopes = if (other != null) scopes.map { it.copy(related = emptyList()) } else scopes)
+    }
 
     /** Adds the folder at [path] as a location (once). The project-wide scope covers everything without paths of its own. */
     fun addLocation(path: String, name: String = ProjectLocation.lastSegment(path), repository: Boolean = false): ProjectDraft {
@@ -177,7 +200,8 @@ data class ProjectDraft(
     fun readable(key: String, all: List<ScopeRef>): List<ScopeRef> {
         val self = scope(key)?.id
         val here = scopes.mapNotNull { s -> s.id?.let { ScopeRef(it, s.title, id.orEmpty(), title) } }
-        return (here + all.filter { r -> here.none { it.id == r.id } }).filter { it.id != self }
+        val others = if (elsewhere) emptyList() else all.filter { r -> here.none { it.id == r.id } }
+        return (here + others).filter { it.id != self }
     }
 
     /** Saved scopes of [original] that saving this draft deletes. */
@@ -210,6 +234,7 @@ data class ProjectDraft(
                 )
             },
         ),
+        "instance" to instance.takeIf { isNew },
     )
 
     companion object {

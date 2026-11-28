@@ -47,6 +47,11 @@ object ErrorCodes {
 class RemoteException(val code: String, message: String) : Exception(message) {
     val isUnknownMethod get() = code == ErrorCodes.UNKNOWN_METHOD
     val isUnavailable get() = code == ErrorCodes.UNAVAILABLE
+    /**
+     * For a method newer than the Mac's Mindmill: it answers `unknown_method`, or `unavailable` for the `voice.*`,
+     * `test.*`, `review.*` and `preview.get` families, which it maps to platform features.
+     */
+    val isMissingOnMac get() = isUnknownMethod || isUnavailable
     val isUnauthorized get() = code == ErrorCodes.UNAUTHORIZED
     val isOffline get() = code == ErrorCodes.OFFLINE || code == ErrorCodes.TIMEOUT
 }

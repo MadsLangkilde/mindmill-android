@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Inbox
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.automirrored.filled.MergeType
 import androidx.compose.material.icons.filled.Mic
@@ -67,6 +68,7 @@ fun sectionIcon(id: String, sfSymbol: String = ""): ImageVector = when (id) {
     "test", "testing" -> Icons.Default.Science
     "strategies" -> Icons.Default.Route
     "project", "projects" -> Icons.Default.Folder
+    "instances" -> Icons.Default.Layers
     "knowledge" -> Icons.AutoMirrored.Filled.MenuBook
     "tags" -> Icons.Default.Sell
     "people" -> Icons.Default.People

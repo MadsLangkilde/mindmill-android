@@ -11,15 +11,21 @@ import dk.langkilde.mindmill.remote.ActionInfo
 import dk.langkilde.mindmill.remote.ActionOutcome
 import dk.langkilde.mindmill.remote.ActionRunner
 import dk.langkilde.mindmill.remote.BinaryFrame
+import dk.langkilde.mindmill.remote.BuildFromPicks
 import dk.langkilde.mindmill.remote.ConnectionState
 import dk.langkilde.mindmill.remote.EmptyJson
+import dk.langkilde.mindmill.remote.ErrorCodes
+import dk.langkilde.mindmill.remote.InstanceList
+import dk.langkilde.mindmill.remote.InstanceSwitchAnswer
 import dk.langkilde.mindmill.remote.RemoteConnection
 import dk.langkilde.mindmill.remote.RemoteException
 import dk.langkilde.mindmill.remote.RemoteMessage
 import dk.langkilde.mindmill.remote.RpcChannel
 import dk.langkilde.mindmill.remote.Scopes
 import dk.langkilde.mindmill.remote.SkillInfo
+import dk.langkilde.mindmill.remote.TestSources
 import dk.langkilde.mindmill.remote.TestTarget
+import dk.langkilde.mindmill.remote.deliverTest
 import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.string
 import dk.langkilde.mindmill.remote.text
@@ -32,6 +38,7 @@ import dk.langkilde.mindmill.voice.AndroidApiAudio
 import dk.langkilde.mindmill.voice.AndroidKeylessDevice
 import dk.langkilde.mindmill.voice.LiveChat
 import dk.langkilde.mindmill.voice.VoiceConfig
+import dk.langkilde.mindmill.voice.VoiceApi
 import dk.langkilde.mindmill.voice.VoiceConversation
 import dk.langkilde.mindmill.voice.VoiceEngine
 import dk.langkilde.mindmill.voice.VoiceRemote
@@ -182,6 +189,7 @@ class MindmillApp : Application() {
                     _refresh.update { it + 1 }
                     catalog = null
                     forgetSkills()
+                    _instancesMissing.value = false
                     if (connection.active?.scope == null) s.hello.scope?.let { setScope(it) }
                     loadReviewCards()
                     scope.launch { runCatching { fetchVoiceConfig() } }
@@ -276,7 +284,48 @@ class MindmillApp : Application() {
         _notice.value = null
         deliveries.clear()
         _buildsStarting.value = emptySet()
+        buildFrom.clear()
+        _instancesMissing.value = false
         _refresh.update { it + 1 }
+    }
+
+    private val _instancesMissing = MutableStateFlow(false)
+    /** The Mac answered `unknown_method` for instances: it is older than them, and the phone shows nothing about them. */
+    val instancesMissing: StateFlow<Boolean> = _instancesMissing
+
+    /** `instances.list`, or null from a Mac older than instances. */
+    suspend fun instances(): InstanceList? = try {
+        InstanceList.parse(call("instances.list"))
+    } catch (e: RemoteException) {
+        if (!e.isUnknownMethod) throw e
+        _instancesMissing.value = true
+        null
+    }
+
+    /**
+     * Opens the instance [id] on the Mac. Mindmill restarts there and the connection closes; until it is back the
+     * phone says it is switching. False when it was open already.
+     */
+    suspend fun switchInstance(id: String, name: String): Boolean =
+        restarting(id, name) { InstanceSwitchAnswer.parse(call("instance.switch", jsonOf("id" to id))) }.switching
+
+    /** Makes an instance called [name] in the Mac folder [path] (`instance.create`); with [open], the Mac switches to it. */
+    suspend fun createInstance(name: String, path: String, open: Boolean): InstanceSwitchAnswer =
+        restarting(null, name.trim(), assumeOnDrop = open) { InstanceSwitchAnswer.parse(call("instance.create", InstanceList.createParams(name, path, open))) }
+
+    /** The Mac can close the connection to restart before its answer arrives: that counts as switching. */
+    private suspend fun restarting(
+        id: String?, name: String, assumeOnDrop: Boolean = true, ask: suspend () -> InstanceSwitchAnswer,
+    ): InstanceSwitchAnswer {
+        val wasOpen = rpc.isOpen
+        val answer = try {
+            ask()
+        } catch (e: RemoteException) {
+            if (!(wasOpen && assumeOnDrop && e.code == ErrorCodes.OFFLINE)) throw e
+            InstanceSwitchAnswer(id, switching = true)
+        }
+        if (answer.switching) connection.instanceSwitching(answer.id ?: id, name)
+        return answer
     }
 
     fun updateSettings(change: (AppSettings) -> AppSettings) {
@@ -311,7 +360,7 @@ class MindmillApp : Application() {
     suspend fun call(method: String, params: JsonObject = EmptyJson, timeoutMs: Long = 30_000): JsonObject {
         if (!rpc.isOpen && !connection.awaitConnected(8_000)) {
             val name = connection.pairedMacName ?: "the Mac"
-            throw RemoteException(dk.langkilde.mindmill.remote.ErrorCodes.OFFLINE, "Can't reach $name right now. Check the connection and try again.")
+            throw RemoteException(ErrorCodes.OFFLINE, "Can't reach $name right now. Check the connection and try again.")
         }
         return rpc.call(method, params, timeoutMs)
     }
@@ -333,6 +382,12 @@ class MindmillApp : Application() {
         null
     }
 
+    /** The Test screen's "Build from" per scope, until the app stops or another Mac is active. */
+    val buildFrom = BuildFromPicks()
+
+    /** `test.sources`, or [TestSources.MISSING] from a Mac older than it. Slow: the Mac asks git. */
+    suspend fun testSources(scopeId: String?): TestSources = TestSources.load(scopeId) { m, p -> call(m, p, 60_000) }
+
     private val _buildsStarting = MutableStateFlow<Set<String>>(emptySet())
     /** Test targets the phone asked the Mac to build, until the Mac answers. */
     val buildsStarting: StateFlow<Set<String>> = _buildsStarting
@@ -353,7 +408,7 @@ class MindmillApp : Application() {
         scope.launch {
             val runner = ActionRunner({ m, p -> call(m, p, TEST_BUILD_TIMEOUT_MS) }, confirmations::ask)
             try {
-                val o = runner.run("test.deliver", jsonOf("target" to target.id, "scope" to scopeId, "session" to session))
+                val o = runner.deliverTest(target.id, scopeId, session)
                 when (o.status) {
                     ActionOutcome.Status.DONE -> done(o.speech.ifBlank { "Delivered ${target.title}." })
                     ActionOutcome.Status.FAILED -> done(o.speech.ifBlank { "Building ${target.title} didn't work." }, error = true)
@@ -375,6 +430,9 @@ class MindmillApp : Application() {
 
     /** `voice.config`, kept for showing which voice is used. */
     suspend fun fetchVoiceConfig(): VoiceConfig = VoiceConfig.parse(call("voice.config")).also { _voiceConfig.value = it }
+
+    /** The Mac's voice API keys and which one is used, set from the phone; see [VoiceApi]. */
+    val voiceApi = VoiceApi { m, p -> call(m, p) }
 
     private val skillsCache = java.util.concurrent.ConcurrentHashMap<String, List<SkillInfo>>()
     @Volatile private var skillsMissing = false

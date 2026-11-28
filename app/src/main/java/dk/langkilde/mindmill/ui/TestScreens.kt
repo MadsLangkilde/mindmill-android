@@ -8,22 +8,38 @@ import android.provider.Settings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.LaptopMac
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -37,11 +53,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -50,7 +68,11 @@ import dk.langkilde.mindmill.delivery.Delivery
 import dk.langkilde.mindmill.delivery.InstallStep
 import dk.langkilde.mindmill.delivery.PreviewWebViewClient
 import dk.langkilde.mindmill.remote.BuildChoice
+import dk.langkilde.mindmill.remote.BuildLog
+import dk.langkilde.mindmill.remote.BuildSource
 import dk.langkilde.mindmill.remote.ConnectionState
+import dk.langkilde.mindmill.remote.canStartMindmill
+import dk.langkilde.mindmill.remote.TestSources
 import dk.langkilde.mindmill.remote.TestTarget
 import dk.langkilde.mindmill.remote.bool
 import dk.langkilde.mindmill.remote.int
@@ -97,6 +119,9 @@ fun TestScreen(nav: Nav) {
     val mac = app.connection.pairedMacName ?: "the Mac"
     val targets = state.value?.objects("targets").orEmpty().filter { TestTarget.forAndroid(it.string("type")) }
     val buildable = TestTarget.list(state.value).filter { TestTarget.forAndroid(it.type) }
+    val picks by app.buildFrom.picks.collectAsState()
+    val picked = picks[scopeId.orEmpty()]
+    val (sources, retrySources) = rememberLoad(scopeId) { app.testSources(scopeId).also { app.buildFrom.reconcile(scopeId, it) } }
     var detecting by remember { mutableStateOf(false) }
     var rechecking by remember { mutableStateOf(false) }
     val ui = rememberCoroutineScope()
@@ -114,7 +139,12 @@ fun TestScreen(nav: Nav) {
             }
             when {
                 buildable.isNotEmpty() -> {
-                    buildable.forEach { t -> BuildRow(t, BuildChoice.of(t, deliveries, starting), checking) { app.requestTestBuild(t, scopeId) } }
+                    BuildFromPicker(sources, picked, retrySources) { app.buildFrom.pick(scopeId, it) }
+                    buildable.forEach { t ->
+                        BuildRow(t, BuildChoice.of(t, deliveries, starting), checking) {
+                            app.requestTestBuild(t, scopeId, TestSources.sessionToBuild(picked, sources.value))
+                        }
+                    }
                     if (!checking && buildable.any { BuildChoice.of(it, deliveries, starting) is BuildChoice.Blocked }) {
                         OutlinedButton(enabled = !rechecking, onClick = {
                             rechecking = true
@@ -147,7 +177,10 @@ fun TestScreen(nav: Nav) {
             SectionTitle("Builds and previews")
             if (deliveries.isEmpty()) ListEmptyState("Nothing sent to this phone yet.")
         }
-        items(deliveries, key = { it.id }) { d -> DeliveryRow(d, steps[d.id], nav) }
+        items(deliveries, key = { it.id }) { d ->
+            val from = d.session?.let { id -> sources.value?.find(id)?.let { "From ${it.label}" } ?: "From a session's version" }
+            DeliveryRow(d, steps[d.id], nav, from)
+        }
         if (targets.isNotEmpty()) {
             item { SectionTitle("Set-up (change it on the Mac)") }
             items(targets) { t -> TargetCard(t) }
@@ -164,6 +197,84 @@ fun TestScreen(nav: Nav) {
             }
         }
     }
+}
+
+/**
+ * Which version Build builds: this Mac's own copy, or the one a Build session works on in its own copy (`test.sources`).
+ * Labels are shortened to keep the menu narrow; the whole title and branch show under the pick and in the menu. A Mac
+ * without sessions' versions shows nothing here.
+ */
+@Composable
+private fun BuildFromPicker(state: Loaded<TestSources>, picked: BuildSource?, onRetry: () -> Unit, onPick: (BuildSource?) -> Unit) {
+    val sources = state.value
+    if (sources?.supported == false) return
+    var open by remember { mutableStateOf(false) }
+    val current = if (sources == null) picked else picked?.let { sources.find(it.id) }
+    val label = current?.label ?: sources?.localLabel ?: TestSources.LOCAL
+    val full = when {
+        current != null -> current.fullLabel.takeIf { current.isShortened }
+        else -> sources?.localFullLabel?.takeIf { sources.isLocalShortened }
+    }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Box(Modifier.fillMaxWidth()) {
+            OutlinedCard(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Build from", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(label, style = MaterialTheme.typography.bodyLarge)
+                        val detail = if (state.loading) "Looking for sessions' versions…" else full
+                        detail?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                    if (state.loading) CircularProgressIndicator(Modifier.padding(start = 8.dp).size(18.dp), strokeWidth = 2.dp)
+                    Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                }
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.widthIn(max = 320.dp)) {
+                SourceItem(sources?.localLabel ?: TestSources.LOCAL, sources?.localFullLabel?.takeIf { sources.isLocalShortened }, current == null) {
+                    open = false
+                    onPick(null)
+                }
+                sources?.sessions?.forEach { s ->
+                    SourceItem(s.label, s.fullLabel.takeIf { s.isShortened }, current?.id == s.id) {
+                        open = false
+                        onPick(s)
+                    }
+                }
+                when {
+                    sources == null -> DropdownMenuItem(
+                        text = { Text("Looking for sessions' versions…") }, onClick = {}, enabled = false,
+                        leadingIcon = { CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) },
+                    )
+                    sources.sessions.isEmpty() -> DropdownMenuItem(
+                        text = { Text("No session has its own version of this project.") }, onClick = {}, enabled = false,
+                        leadingIcon = { Spacer(Modifier.size(24.dp)) },
+                    )
+                }
+            }
+        }
+        Text(
+            "Sessions can work on their own version of the code. Pick whose version to build and test.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        state.error?.let {
+            NoticeBar("Couldn't list the sessions' versions. $it", Modifier.padding(top = 4.dp), actionLabel = "Try again", onAction = onRetry, error = true)
+        }
+    }
+}
+
+@Composable
+private fun SourceItem(label: String, full: String?, selected: Boolean, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                Text(label, style = MaterialTheme.typography.bodyLarge)
+                full?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+        },
+        leadingIcon = { if (selected) Icon(Icons.Default.Check, contentDescription = "Picked") else Spacer(Modifier.size(24.dp)) },
+        onClick = onClick,
+    )
 }
 
 /** One test target: build it now, or what's happening or missing. */
@@ -187,14 +298,14 @@ private fun BuildRow(t: TestTarget, choice: BuildChoice, checking: Boolean, onBu
 }
 
 @Composable
-private fun DeliveryRow(d: Delivery, step: InstallStep?, nav: Nav) {
+private fun DeliveryRow(d: Delivery, step: InstallStep?, nav: Nav, from: String?) {
     val app = LocalApp.current
     val context = LocalContext.current
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Text(d.title, style = MaterialTheme.typography.bodyLarge)
         Text(listOfNotNull(
             when (d.kind) { "apk" -> "Android build"; "preview" -> "Preview"; else -> "Link" },
-            d.target, d.size?.takeIf { it > 1024 * 1024 }?.let { "${it / 1024 / 1024} MB" },
+            d.target, d.size?.takeIf { it > 1024 * 1024 }?.let { "${it / 1024 / 1024} MB" }, from,
         ).joinToString(" · "), style = MaterialTheme.typography.bodySmall)
         if (d.isBuilding) {
             Text("Building on ${app.connection.pairedMacName ?: "the Mac"}…", style = MaterialTheme.typography.bodySmall)
@@ -225,6 +336,9 @@ private fun DeliveryRow(d: Delivery, step: InstallStep?, nav: Nav) {
                     TextButton(onClick = { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri())) } }) { Text("Open in browser") }
                 }
             }
+        }
+        if (d.hasLog && !d.isBuilding) {
+            TextButton(onClick = { nav.go(Screen.BuildLog(d.id, d.title)) }) { Text("Show log") }
         }
         androidx.compose.material3.HorizontalDivider(Modifier.padding(top = 6.dp))
     }
@@ -378,6 +492,52 @@ private fun PreviewImage(delivery: String, path: String, modifier: Modifier) {
         ?: Text("Loading image…", style = MaterialTheme.typography.bodySmall, modifier = modifier)
 }
 
+/**
+ * What building and testing a delivery printed (`test.log`): the first error on top, then the log, monospaced and
+ * selectable, starting at its end. Long lines scroll sideways inside the log, never the screen.
+ */
+@Composable
+fun BuildLogScreen(delivery: String, title: String) {
+    val app = LocalApp.current
+    val (state, retry) = rememberLoad(delivery) { BuildLog.parse(app.call("test.log", jsonOf("delivery" to delivery), 60_000)) }
+    val log = state.value
+    val mono = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+    Column(Modifier.fillMaxSize()) {
+        Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(vertical = 4.dp))
+        when {
+            state.waiting -> WaitingForMac(retry)
+            state.loading && log == null -> {
+                NoticeBar("Getting the build log from ${app.connection.pairedMacName ?: "the Mac"}…", Modifier.padding(vertical = 4.dp))
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        }
+        state.error?.let { NoticeBar(it, Modifier.padding(vertical = 4.dp), actionLabel = "Try again", onAction = retry, error = true) }
+        log?.firstError?.let { first ->
+            val cs = MaterialTheme.colorScheme
+            Surface(color = cs.errorContainer, contentColor = cs.onErrorContainer, shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Text("First error", style = MaterialTheme.typography.labelMedium)
+                    SelectionContainer { Text(first, style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)) }
+                }
+            }
+        }
+        when {
+            log == null -> Unit
+            log.log.isBlank() -> ListEmptyState("The build printed nothing.")
+            else -> Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 4.dp, bottom = 8.dp)) {
+                SelectionContainer {
+                    Text(
+                        log.log, style = mono, softWrap = false,
+                        modifier = Modifier.verticalScroll(rememberScrollState(Int.MAX_VALUE)).horizontalScroll(rememberScrollState()).padding(12.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun WebScreen(title: String, url: String, preview: Boolean) {
@@ -404,6 +564,7 @@ fun ConnectionScreen(nav: Nav) {
     val app = LocalApp.current
     val conn by app.connection.state.collectAsState()
     val settings by app.settings.collectAsState()
+    val pairings by app.connection.pairings.collectAsState()
     LazyColumn(Modifier.fillMaxSize()) {
         item {
             MacsCard(nav)
@@ -411,7 +572,8 @@ fun ConnectionScreen(nav: Nav) {
                 val c = conn
                 Text(
                     when (c) {
-                        is ConnectionState.Connected -> "Connected to ${c.hello.name} at ${c.host}. ${c.hello.brain} is the brain."
+                        is ConnectionState.Connected -> "Connected to ${c.hello.name} at ${c.host}. ${c.hello.brain} is the brain." +
+                            (c.hello.instance?.let { " Instance: ${it.name}." } ?: "")
                         is ConnectionState.Connecting -> "Connecting to ${c.macName}" + (c.host?.let { " at $it" } ?: "") + "…"
                         is ConnectionState.Reconnecting -> c.problem.message(c.macName) + " Trying again shortly."
                         is ConnectionState.Unreachable -> c.problem.message(c.macName)
@@ -423,7 +585,15 @@ fun ConnectionScreen(nav: Nav) {
                     c.problem.tips(c.macName).forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp)) }
                 }
                 if (c !is ConnectionState.Connected) {
-                    Button(onClick = { app.connection.retryNow() }, modifier = Modifier.padding(top = 8.dp)) { Text("Retry now") }
+                    val canStart = canStartMindmill(pairings.active, c)
+                    ChipFlow(Modifier.padding(top = 8.dp)) {
+                        if (canStart) {
+                            StartMindmillButton(c, outlined = false)
+                            OutlinedButton(onClick = { app.connection.retryNow() }) { Text("Retry now") }
+                        } else {
+                            Button(onClick = { app.connection.retryNow() }) { Text("Retry now") }
+                        }
+                    }
                 } else {
                     TextButton(onClick = { nav.go(Screen.RunAction("app.show", mapOf("screen" to "settings", "id" to "remote"))) }) {
                         Text("Show Remote settings on the Mac")
@@ -436,7 +606,7 @@ fun ConnectionScreen(nav: Nav) {
                     detail = "Off: the Mac decides, and may use its real-time voice.")
                 SwitchRow("Bluetooth headset or car", settings.routeToHeadset, { v -> app.updateSettings { it.copy(routeToHeadset = v) } },
                     detail = "Talk through it when one is connected.")
-                VoiceKeyTest(Modifier.padding(top = 6.dp))
+                VoiceApiSection(Modifier.padding(top = 6.dp))
             }
             if (android.os.Build.VERSION.SDK_INT >= 31) {
                 SectionCard("Look") {

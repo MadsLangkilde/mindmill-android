@@ -29,6 +29,8 @@ sealed interface Screen {
     @Serializable data object PairMac : Screen
     @Serializable data object Projects : Screen
     @Serializable data class ProjectEditor(val id: String?) : Screen
+    /** The Mac's Mindmill instances: knowledge bases of their own, one open at a time. */
+    @Serializable data object Instances : Screen
     @Serializable data class AllActions(val area: String? = null) : Screen
     @Serializable data class RunAction(val name: String, val defaults: Map<String, String> = emptyMap()) : Screen
     @Serializable data object Knowledge : Screen
@@ -46,6 +48,8 @@ sealed interface Screen {
     @Serializable data class MeetingDetail(val id: String, val title: String) : Screen
     @Serializable data object LiveMeeting : Screen
     @Serializable data class Web(val title: String, val url: String, val preview: Boolean) : Screen
+    /** What building and testing [delivery] printed (`test.log`). */
+    @Serializable data class BuildLog(val delivery: String, val title: String) : Screen
     /** What the session's AI can use: skills, plugins and tools (MCP servers). */
     @Serializable data class SkillsTools(val tab: String = "skills") : Screen
     /** One of the user's own skills; [name] null writes a new one. */

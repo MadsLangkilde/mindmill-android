@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.LaptopMac
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
@@ -146,6 +147,7 @@ fun ScopePicker(go: (Screen) -> Unit) {
     val current = rememberCurrentScope()
     val ui = rememberCoroutineScope()
     val scopes = hello?.scopes.orEmpty()
+    val instance = rememberOpenInstance()
     if (scopes.isEmpty() && current == null) return
     var open by remember { mutableStateOf(false) }
     val chosen = scopes.firstOrNull { it.id == current }
@@ -210,6 +212,18 @@ fun ScopePicker(go: (Screen) -> Unit) {
                 text = { Text("Manage projects…") }, leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
                 onClick = { open = false; go(Screen.Projects) },
             )
+            instance?.let { i ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text("Instances…")
+                            Text("Open: ${i.name}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
+                    leadingIcon = { Icon(Icons.Default.Layers, contentDescription = null) },
+                    onClick = { open = false; go(Screen.Instances) },
+                )
+            }
         }
     }
 }

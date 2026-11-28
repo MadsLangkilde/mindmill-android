@@ -303,6 +303,7 @@ private data class MoreRow(val title: String, val subtitle: String, val icon: St
 fun MoreScreen(nav: Nav) {
     val ctx = LocalNavContext.current
     val shown = DrawerModel.destinations(ctx.sections).map { it.screen(ctx.mode, ctx.kbSections) }.toSet()
+    val instance = rememberOpenInstance()
     val groups = listOf(
         "Ask and do" to listOf(
             MoreRow("Ask Mindmill", "Ask for anything in your own words, typed or said", "assistant", Screen.NewSession(ctx.mode.id)),
@@ -319,11 +320,12 @@ fun MoreScreen(nav: Nav) {
         ),
         "Set-up" to listOf(
             MoreRow("Projects", "The Mac's projects: their folders and scopes", "projects", Screen.Projects),
+            instance?.let { MoreRow("Instances", "Knowledge bases of their own, one open at a time. Open: ${it.name}", "instances", Screen.Instances) },
             MoreRow("Private and shared", "Which kinds of entries go into the project's repository", "sharing", Screen.SharingDefaults()),
             MoreRow("Skills and tools", "The AI's skills, plugins and tools", "skills", Screen.SkillsTools()),
             MoreRow("Connection", "Your Macs, switching between them, voice options, colours", "connection", Screen.Connection),
         ),
-    ).map { (t, rows) -> t to rows.filter { it.screen !in shown } }.filter { it.second.isNotEmpty() }
+    ).map { (t, rows) -> t to rows.filterNotNull().filter { it.screen !in shown } }.filter { it.second.isNotEmpty() }
     val app = LocalApp.current
     val (catalog, _) = rememberLoad { app.actionCatalog() }
     val areas = catalog.value?.let { (actions, order) -> dk.langkilde.mindmill.remote.ActionInfo.grouped(actions, order) }.orEmpty()

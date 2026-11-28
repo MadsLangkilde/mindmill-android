@@ -7,6 +7,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +32,10 @@ data class HelloInfo(
     val scope: String?,
     val scopes: List<Scope>,
     val sections: List<String>,
+    /** The Mindmill instance open on the Mac; null from a Mac older than instances. */
+    val instance: InstanceRef? = null,
+    /** The launcher's port when it may start Mindmill on the Mac; null when it is off or the Mac is older. */
+    val launcherPort: Int? = null,
 ) {
     companion object {
         fun parse(o: JsonObject) = HelloInfo(
@@ -40,6 +45,8 @@ data class HelloInfo(
             scope = o.string("scope"),
             scopes = o.objects("scopes").mapNotNull(Scope::parse),
             sections = o.strings("sections"),
+            instance = InstanceRef.parse(o.obj("instance")),
+            launcherPort = o.obj("launcher").int("port")?.takeIf { it in 1..65535 },
         )
     }
 }
@@ -49,7 +56,11 @@ data class HelloInfo(
  * with backoff when the socket drops. [ConnectionMachine] decides what to show and how long to wait. The phone can be
  * paired with several Macs ([pairings]) and talks to one at a time; [switchTo] moves to another.
  */
-class RemoteConnection(private val store: PairingStore, private val scope: CoroutineScope) {
+class RemoteConnection(
+    private val store: PairingStore,
+    private val scope: CoroutineScope,
+    private val launcher: MacLauncher = MacLauncher(),
+) {
     val rpc = RpcChannel()
 
     private val _pairings = MutableStateFlow(store.loadPairings())
@@ -74,6 +85,14 @@ class RemoteConnection(private val store: PairingStore, private val scope: Corou
     private var cachedClient: Pair<String, OkHttpClient>? = null
     private var machine: ConnectionMachine? = null
 
+    private val _switching = MutableStateFlow<InstanceSwitch?>(null)
+    /** Set while the Mac restarts Mindmill on another instance the phone asked for, until it is back. */
+    val switching: StateFlow<InstanceSwitch?> = _switching
+
+    private val _launch = MutableStateFlow<LaunchState>(LaunchState.Idle)
+    /** Asking the active Mac's launcher to start Mindmill, and what it said. */
+    val launch: StateFlow<LaunchState> = _launch
+
     /** False while Android says there is no network at all; set by the app's network callback. */
     @Volatile var networkAvailable = true
         private set
@@ -97,6 +116,46 @@ class RemoteConnection(private val store: PairingStore, private val scope: Corou
         loop?.cancel()
         loop = null
         closeLink()
+    }
+
+    /**
+     * The Mac said it restarts Mindmill on the instance [id] ([name]): the connection is about to close. Until the
+     * next `hello` the phone says it is switching rather than that it can't reach the Mac.
+     */
+    fun instanceSwitching(id: String?, name: String) {
+        val s = InstanceSwitch(id, name, System.currentTimeMillis())
+        _switching.value = s
+        machine?.reset()
+        scope.launch {
+            delay(SWITCH_PATIENCE_MS)
+            if (_switching.value === s) _switching.value = null
+        }
+    }
+
+    /** Asks the active Mac's launcher to start Mindmill, then connects at once and keeps trying while it starts. */
+    fun startMac() {
+        val pairing = active ?: return
+        val port = pairing.launcherPort ?: return
+        if (_launch.value is LaunchState.Asking) return
+        _launch.value = LaunchState.Asking(pairing.macName)
+        scope.launch {
+            val result = launcher.start(pairing.orderedHosts, port, pairing.token)
+            if (active?.isMac(pairing.fingerprint) != true) return@launch
+            if (result.ok) {
+                val starting = LaunchState.Starting(pairing.macName, result == LaunchResult.RUNNING, System.currentTimeMillis())
+                _launch.value = starting
+                machine?.reset()
+                retryNow()
+                delay(START_PATIENCE_MS)
+                if (_launch.value === starting) _launch.value = LaunchState.Idle
+            } else {
+                _launch.value = LaunchState.Failed(pairing.macName, result)
+            }
+        }
+    }
+
+    fun dismissLaunch() {
+        if (_launch.value is LaunchState.Failed) _launch.value = LaunchState.Idle
     }
 
     /** Try again now instead of waiting out the backoff. Does nothing while connected. */
@@ -166,6 +225,8 @@ class RemoteConnection(private val store: PairingStore, private val scope: Corou
     private fun restartForActive() {
         machine = null
         _lastHello.value = null
+        _switching.value = null
+        _launch.value = LaunchState.Idle
         val next = active
         _state.value = next?.let { ConnectionState.Connecting(it.macName, null, 0, false) } ?: ConnectionState.NotPaired
         if (next != null) start()
@@ -229,10 +290,10 @@ class RemoteConnection(private val store: PairingStore, private val scope: Corou
                         val hello = rpc.call("hello", jsonOf("token" to pairing.token, "platform" to PLATFORM), 10_000)
                         val info = HelloInfo.parse(hello)
                         val known = pairings.value.find(pairing.fingerprint)
-                        val name = hello.string("name")?.takeIf { it.isNotBlank() } ?: known?.macName
-                        if (known != null && (host != known.lastHost || name != known.macName)) {
-                            save(pairings.value.updated(pairing.fingerprint) { it.copy(lastHost = host, macName = name ?: it.macName) })
-                        }
+                        val next = known?.afterHello(host, hello.string("name"), info)
+                        if (next != null && next != known) save(pairings.value.updated(pairing.fingerprint) { next })
+                        _switching.value = null
+                        _launch.value = LaunchState.Idle
                         _lastHello.value = info
                         _state.value = m.connected(host, info)
                         l.closed.await()
@@ -349,3 +410,31 @@ class PairingFailed(val problem: ConnectionProblem, val macName: String) : Excep
 
 /** Sent with `pair` and `hello`, so the Mac sends this phone only builds it can install. */
 const val PLATFORM = "android"
+
+/**
+ * Whether to offer starting Mindmill on [mac]: the phone can't reach it, the network is there, it is the Mac the phone
+ * paired with (no certificate trouble), and the Mac said it has a launcher.
+ */
+fun canStartMindmill(mac: StoredPairing?, state: ConnectionState): Boolean {
+    val problem = when (state) {
+        is ConnectionState.Unreachable -> state.problem
+        is ConnectionState.Reconnecting -> state.problem
+        else -> return false
+    }
+    return mac?.launcherPort != null && problem.kind != ConnectionProblem.Kind.NO_NETWORK && !problem.needsUser
+}
+
+/** How long the phone says Mindmill is restarting on another instance before it shows the plain connection state again. */
+const val SWITCH_PATIENCE_MS = 60_000L
+
+/** How long the phone says Mindmill is starting after the launcher said OK. */
+const val START_PATIENCE_MS = 45_000L
+
+/** Asking a Mac's launcher to start Mindmill there. */
+sealed interface LaunchState {
+    data object Idle : LaunchState
+    data class Asking(val macName: String) : LaunchState
+    /** The launcher said OK; [wasRunning] when Mindmill ran already. */
+    data class Starting(val macName: String, val wasRunning: Boolean, val sinceMillis: Long) : LaunchState
+    data class Failed(val macName: String, val result: LaunchResult) : LaunchState
+}

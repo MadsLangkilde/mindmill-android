@@ -1,5 +1,6 @@
 package dk.langkilde.mindmill.store
 
+import dk.langkilde.mindmill.remote.HelloInfo
 import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.parseJsonObject
 import org.junit.Assert.assertEquals
@@ -115,5 +116,41 @@ class PairingsTest {
         val p = Pairings(listOf(studio, laptop), "ff".repeat(32))
         assertEquals(studio, p.active)
         assertEquals(studio.fingerprint, Pairings.fromJson(p.toJson()).active?.fingerprint)
+    }
+
+    private fun hello(json: String) = HelloInfo.parse(parseJsonObject(json)!!)
+
+    @Test
+    fun helloKeepsTheLauncherPortAndForgetsItWhenTheMacTurnsItOff() {
+        val on = studio.afterHello("192.168.1.5", "Studio", hello("""{"launcher": {"port": 7879}}"""))
+        assertEquals(7879, on.launcherPort)
+        assertEquals("192.168.1.5", on.lastHost)
+        assertNull(on.afterHello("192.168.1.5", "Studio", hello("""{"launcher": null}""")).launcherPort)
+        assertNull(on.afterHello("192.168.1.5", "Studio", hello("""{"name": "an older Mac"}""")).launcherPort)
+    }
+
+    @Test
+    fun theLauncherPortIsKeptWithTheMac() {
+        val store = PairingStore(MemoryKv(), XorCipher())
+        store.savePairings(Pairings().paired(studio.copy(launcherPort = 7879)).paired(laptop))
+        val back = store.loadPairings()
+        assertEquals(7879, back.find(studio.fingerprint)?.launcherPort)
+        assertNull(back.find(laptop.fingerprint)?.launcherPort)
+    }
+
+    @Test
+    fun anotherInstanceWithoutThePhonesScopeForgetsIt() {
+        val scopes = """"scopes": [{"id": "work", "title": "Work"}, {"id": "android", "title": "Android"}]"""
+        assertEquals("android", studio.afterHello("h", null, hello("""{$scopes}""")).scope)
+        val other = studio.afterHello("h", null, hello("""{"instance": {"id": "client-a"}, "scopes": [{"id": "client-a", "title": "Client A"}]}"""))
+        assertNull(other.scope)
+        assertEquals("android", studio.afterHello("h", null, hello("""{"scopes": []}""")).scope)
+    }
+
+    @Test
+    fun helloRenamesTheMacOnlyWithAName() {
+        assertEquals("Studio 2", studio.afterHello("h", "Studio 2", hello("{}")).macName)
+        assertEquals("Studio", studio.afterHello("h", " ", hello("{}")).macName)
+        assertEquals(studio.copy(lastHost = "h"), studio.afterHello("h", null, hello("""{"scopes": [{"id": "android"}]}""")))
     }
 }

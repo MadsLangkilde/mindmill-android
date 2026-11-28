@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Badge
+import androidx.compose.material3.Button
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -112,6 +113,10 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import dk.langkilde.mindmill.Notice
 import dk.langkilde.mindmill.R
 import dk.langkilde.mindmill.remote.ConnectionState
+import dk.langkilde.mindmill.remote.LaunchState
+import dk.langkilde.mindmill.remote.canStartMindmill
+import dk.langkilde.mindmill.remote.macName
+import dk.langkilde.mindmill.remote.message
 import dk.langkilde.mindmill.remote.RemoteException
 import dk.langkilde.mindmill.remote.bool
 import dk.langkilde.mindmill.remote.jsonOf
@@ -146,10 +151,23 @@ fun MindmillRoot(open: Screen? = null, onOpened: () -> Unit = {}) {
 
     val activeMac by app.activeMac.collectAsState()
     var shownMac by rememberSaveable { mutableStateOf(activeMac) }
+    val hello by app.connection.lastHello.collectAsState()
+    val instance = hello?.instance?.id
+    var shownInstance by rememberSaveable { mutableStateOf(instance) }
     if (shownMac != activeMac) {
         shownMac = activeMac
+        shownInstance = null
         navigator.restart()
         SessionArchive.overrides.clear()
+    }
+    if (instance != null && instance != shownInstance) {
+        if (shownInstance != null) {
+            val onInstances = navigator.state.top == Screen.Instances
+            navigator.restart()
+            SessionArchive.overrides.clear()
+            if (onInstances) navigator.go(Screen.Instances)
+        }
+        shownInstance = instance
     }
 
     if (conn is ConnectionState.NotPaired || conn is ConnectionState.Unauthorized) {
@@ -450,6 +468,7 @@ fun Screen.title(): String = when (this) {
     Screen.PairMac -> "Pair another Mac"
     Screen.Projects -> "Projects"
     is Screen.ProjectEditor -> if (id == null) "New project" else "Edit project"
+    Screen.Instances -> "Instances"
     is Screen.AllActions -> area?.let { dk.langkilde.mindmill.remote.ActionInfo.areaTitle(it) } ?: "All actions"
     is Screen.RunAction -> dk.langkilde.mindmill.remote.humanize(name.replace('.', ' '))
     Screen.Knowledge -> "Knowledge"
@@ -467,6 +486,7 @@ fun Screen.title(): String = when (this) {
     is Screen.MeetingDetail -> "Meeting"
     Screen.LiveMeeting -> "Meeting on this phone"
     is Screen.Web -> title
+    is Screen.BuildLog -> "Build log"
     is Screen.SkillsTools -> "Skills and tools"
     is Screen.SkillEditor -> name ?: "New skill"
     is Screen.SharingDefaults -> "Private and shared"
@@ -573,25 +593,43 @@ private fun rememberStructure(): AppStructure {
 }
 
 
-/** How the connection is, in the layout: quiet while connecting, a countdown while retrying, reasons and tips when stuck. */
+/**
+ * How the connection is, in the layout: quiet while connecting, a countdown while retrying, reasons and tips when stuck.
+ * While Mindmill restarts on another instance, or starts after the phone asked, it says that instead.
+ */
 @Composable
 fun ConnectionBanner(conn: ConnectionState) {
     val app = LocalApp.current
-    when (conn) {
-        is ConnectionState.Connecting -> Row(
-            Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-            Text(
-                when {
-                    conn.attempt == 0 && !conn.wasConnected -> "Connecting to ${conn.macName}…"
-                    conn.attempt == 0 -> "Reconnecting to ${conn.macName}…"
-                    else -> "Trying ${conn.macName} again…"
-                },
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 8.dp),
-            )
+    val switching by app.connection.switching.collectAsState()
+    val launch by app.connection.launch.collectAsState()
+    val mac = conn.macName ?: app.connection.pairedMacName ?: "the Mac"
+    switching?.let {
+        ProgressLine("Switching to ${it.name}: Mindmill restarts on $mac, and the phone reconnects by itself.")
+        return
+    }
+    if (conn is ConnectionState.Connected) return
+    when (val l = launch) {
+        is LaunchState.Asking -> {
+            ProgressLine("Asking ${l.macName} to start Mindmill…")
+            return
         }
+        is LaunchState.Starting -> {
+            ProgressLine(if (l.wasRunning) "Mindmill is running on ${l.macName}. Connecting…" else "Starting Mindmill on ${l.macName}. It takes a few seconds…")
+            return
+        }
+        is LaunchState.Failed -> NoticeBar(
+            l.result.message(l.macName), Modifier.padding(vertical = 4.dp), error = true, onDismiss = { app.connection.dismissLaunch() },
+        )
+        LaunchState.Idle -> Unit
+    }
+    when (conn) {
+        is ConnectionState.Connecting -> ProgressLine(
+            when {
+                conn.attempt == 0 && !conn.wasConnected -> "Connecting to ${conn.macName}…"
+                conn.attempt == 0 -> "Reconnecting to ${conn.macName}…"
+                else -> "Trying ${conn.macName} again…"
+            },
+        )
         is ConnectionState.Reconnecting -> {
             val left = secondsUntil(conn.retryAtMillis)
             NoticeBar(
@@ -601,6 +639,34 @@ fun ConnectionBanner(conn: ConnectionState) {
         }
         is ConnectionState.Unreachable -> UnreachableCard(conn)
         else -> Unit
+    }
+}
+
+@Composable
+private fun ProgressLine(text: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+        Text(
+            text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 8.dp),
+        )
+    }
+}
+
+/** "Start Mindmill on <Mac>", when the phone can't reach the Mac and the Mac said it has a launcher. */
+@Composable
+fun StartMindmillButton(conn: ConnectionState, outlined: Boolean = true) {
+    val app = LocalApp.current
+    val pairings by app.connection.pairings.collectAsState()
+    val launch by app.connection.launch.collectAsState()
+    val mac = pairings.active ?: return
+    if (!canStartMindmill(mac, conn)) return
+    val busy = launch is LaunchState.Asking || launch is LaunchState.Starting
+    val label = if (launch is LaunchState.Asking) "Asking ${mac.macName}…" else "Start Mindmill on ${mac.macName}"
+    if (outlined) {
+        OutlinedButton(enabled = !busy, onClick = { app.connection.startMac() }) { Text(label) }
+    } else {
+        Button(enabled = !busy, onClick = { app.connection.startMac() }) { Text(label) }
     }
 }
 
@@ -628,12 +694,13 @@ private fun UnreachableCard(conn: ConnectionState.Unreachable) {
                         modifier = Modifier.padding(top = 4.dp, end = 8.dp))
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+            ChipFlow(Modifier.padding(top = 4.dp, end = 8.dp)) {
+                StartMindmillButton(conn)
                 OutlinedButton(onClick = { app.connection.retryNow() }) { Text("Retry") }
-                if (left > 0) {
-                    Text("Trying again in ${left}s", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.padding(start = 12.dp))
-                }
+            }
+            if (left > 0) {
+                Text("Trying again in ${left}s", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.padding(top = 2.dp, bottom = 4.dp))
             }
         }
     }
@@ -661,6 +728,7 @@ private fun ScreenContent(nav: Nav, screen: Screen) {
         Screen.PairMac -> PairingScreen(reason = null, embedded = true, onPaired = { nav.back() })
         Screen.Projects -> ProjectsScreen(nav)
         is Screen.ProjectEditor -> ProjectEditorScreen(nav, s.id)
+        Screen.Instances -> InstancesScreen()
         is Screen.AllActions -> AllActionsScreen(nav, s.area)
         is Screen.RunAction -> RunActionScreen(nav, s.name, s.defaults)
         Screen.Knowledge -> KnowledgeScreen(nav)
@@ -678,6 +746,7 @@ private fun ScreenContent(nav: Nav, screen: Screen) {
         is Screen.MeetingDetail -> MeetingDetailScreen(s.id, s.title)
         Screen.LiveMeeting -> LiveMeetingScreen(nav)
         is Screen.Web -> WebScreen(s.title, s.url, s.preview)
+        is Screen.BuildLog -> BuildLogScreen(s.delivery, s.title)
         is Screen.SkillsTools -> SkillsToolsScreen(nav, s.tab)
         is Screen.SkillEditor -> SkillEditorScreen(nav, s.name, s.location, s.scope)
         is Screen.SharingDefaults -> SharingDefaultsScreen(s.scope)

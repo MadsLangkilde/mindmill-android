@@ -229,7 +229,7 @@ class VoiceConversation(
                 _ui.update { it.copy(phase = (data.string("state") ?: "").replaceFirstChar { c -> c.uppercase() }) }
             }
             "voice.clear" -> if (engine == VoiceEngine.API) apiAudio.clear()
-            "voice.fallback" -> fallBack(data.string("speech").orEmpty(), data.string("reason"))
+            "voice.fallback" -> fallBack(data.string("speech").orEmpty(), fallbackNotice(data.string("reason"), data.string("message")))
         }
     }
 
@@ -277,7 +277,7 @@ class VoiceConversation(
 
     fun dropCard(card: VoiceActionCard) = _ui.update { it.copy(cards = it.cards - card) }
 
-    private fun fallBack(speech: String, reason: String?) {
+    private fun fallBack(speech: String, notice: String) {
         if (conversation == null) return
         _ui.value.session?.let { id ->
             end()
@@ -289,7 +289,7 @@ class VoiceConversation(
             apiAudio.clear()
         }
         engine = VoiceEngine.KEYLESS
-        _ui.update { it.copy(engine = engine, engineLabel = engineLabel(), notice = reason?.let { r -> "Switched to on-phone voice: $r" }) }
+        _ui.update { it.copy(engine = engine, engineLabel = engineLabel(), notice = notice) }
         if (machine.state == KeylessState.IDLE || machine.state == KeylessState.PAUSED) machine.start()
         if (speech.isNotBlank()) machine.announce(speech)
     }
@@ -336,5 +336,17 @@ class VoiceConversation(
         KeylessState.SENDING -> "Thinking"
         KeylessState.SPEAKING -> "Speaking"
         KeylessState.PAUSED -> "Paused"
+    }
+
+    companion object {
+        /** What `voice.fallback` shows: the Mac's own [message] (why, and what to do), else a sentence for its [reason]. */
+        fun fallbackNotice(reason: String?, message: String?): String = message?.trim()?.takeIf { it.isNotEmpty() } ?: when (reason) {
+            "badKey" -> "The voice API refused the Mac's key, so the phone's own voice took over. Check the key in the voice settings."
+            "quota" -> "The voice API's quota or credit ran out, so the phone's own voice took over."
+            "network" -> "The Mac lost its connection to the voice API, so the phone's own voice took over."
+            "keyLocked" -> "The Mac couldn't read its voice API key: macOS is asking for your login password there. Enter it on the Mac, " +
+                "or send the key again from the voice settings. The phone's own voice took over meanwhile."
+            else -> "The voice API stopped working, so the phone's own voice took over."
+        }
     }
 }

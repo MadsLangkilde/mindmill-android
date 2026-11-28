@@ -1,5 +1,6 @@
 package dk.langkilde.mindmill.store
 
+import dk.langkilde.mindmill.remote.HelloInfo
 import dk.langkilde.mindmill.remote.bool
 import dk.langkilde.mindmill.remote.int
 import dk.langkilde.mindmill.remote.jsonOf
@@ -22,14 +23,28 @@ data class StoredPairing(
     val lastHost: String? = null,
     /** The phone's own current scope on this Mac; the Mac's current one is separate. */
     val scope: String? = null,
+    /** The port of the Mac's launcher, which starts Mindmill when asked, as the last `hello` said; null when it is off. */
+    val launcherPort: Int? = null,
 ) {
     fun toJson(): JsonObject = jsonOf(
         FIELD_NAME to macName, FIELD_HOSTS to hosts, FIELD_PORT to port,
         FIELD_FINGERPRINT to fingerprint, FIELD_TOKEN to token, FIELD_LAST_HOST to lastHost, FIELD_SCOPE to scope,
+        FIELD_LAUNCHER_PORT to launcherPort,
     )
 
     /** Hosts to try, the one that answered last time first. */
     val orderedHosts: List<String> get() = listOfNotNull(lastHost).plus(hosts).distinct()
+
+    /**
+     * What a `hello` from this Mac at [host] changes: where it answered, its [name], its launcher, and the phone's scope,
+     * forgotten when the Mac no longer has it (another instance opened there, or the scope was deleted).
+     */
+    fun afterHello(host: String, name: String?, info: HelloInfo): StoredPairing = copy(
+        lastHost = host,
+        macName = name?.takeIf { it.isNotBlank() } ?: macName,
+        launcherPort = info.launcherPort,
+        scope = scope?.takeIf { s -> info.scopes.isEmpty() || info.scopes.any { it.id == s } },
+    )
 
     fun isMac(fingerprint: String) = this.fingerprint.equals(fingerprint, ignoreCase = true)
 
@@ -41,7 +56,8 @@ data class StoredPairing(
         const val FIELD_TOKEN = "token"
         const val FIELD_LAST_HOST = "lastHost"
         const val FIELD_SCOPE = "scope"
-        val FIELDS = setOf(FIELD_NAME, FIELD_HOSTS, FIELD_PORT, FIELD_FINGERPRINT, FIELD_TOKEN, FIELD_LAST_HOST, FIELD_SCOPE)
+        const val FIELD_LAUNCHER_PORT = "launcherPort"
+        val FIELDS = setOf(FIELD_NAME, FIELD_HOSTS, FIELD_PORT, FIELD_FINGERPRINT, FIELD_TOKEN, FIELD_LAST_HOST, FIELD_SCOPE, FIELD_LAUNCHER_PORT)
 
         fun fromJson(o: JsonObject): StoredPairing? {
             val token = o.string(FIELD_TOKEN)?.takeIf { it.isNotEmpty() } ?: return null
@@ -49,6 +65,7 @@ data class StoredPairing(
             val hosts = o.strings(FIELD_HOSTS).takeIf { it.isNotEmpty() } ?: return null
             return StoredPairing(
                 o.string(FIELD_NAME) ?: "Mac", hosts, o.int(FIELD_PORT) ?: 7878, fp, token, o.string(FIELD_LAST_HOST), o.string(FIELD_SCOPE),
+                o.int(FIELD_LAUNCHER_PORT)?.takeIf { it in 1..65535 },
             )
         }
     }
