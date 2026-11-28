@@ -119,8 +119,8 @@ class VoiceConversation(
     private var seq = 0L
     private val replies = mutableMapOf<String, StringBuilder>()
 
-    /** Live voice in a session lost its voice API: the app carries on with on-phone live chat in [String]. */
-    var onSessionFallback: ((String) -> Unit)? = null
+    /** Live voice in a session lost its voice API: the app carries on with on-phone live chat in the session, and shows why. */
+    var onSessionFallback: ((session: String, why: String) -> Unit)? = null
 
     val machine = KeylessVoiceMachine(object : KeylessEffects {
         override fun startListening() = device.startListening()
@@ -281,7 +281,7 @@ class VoiceConversation(
         if (conversation == null) return
         _ui.value.session?.let { id ->
             end()
-            onSessionFallback?.invoke(id)
+            onSessionFallback?.invoke(id, notice)
             return
         }
         if (engine == VoiceEngine.API) {

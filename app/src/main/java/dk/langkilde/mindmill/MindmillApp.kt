@@ -163,7 +163,10 @@ class MindmillApp : Application() {
         voice = VoiceConversation(RpcVoiceRemote(rpc) { fetchVoiceConfig() }, voiceDevice, AndroidApiAudio(this), scope)
         liveChat = LiveChat({ m, p -> call(m, p) }, AndroidKeylessDevice(this) { settings.value.routeToHeadset }, scope)
         meeting = LiveMeeting(this, rpc, scope) { on -> micForMeeting = on; updateMic() }
-        voice.onSessionFallback = { id -> liveChat.startInSession(id) }
+        voice.onSessionFallback = { id, why ->
+            liveChat.startInSession(id)
+            done(why, error = true)
+        }
         deliveries = Deliveries(this, rpc, scope)
 
         rpc.addEventListener { e -> scope.launch { handle(e) } }

@@ -321,7 +321,8 @@ class EngineSelectionTest {
     fun sessionVoiceShowsWhatItHearsAndHandsOverToOnPhoneVoiceWhenTheApiFails() = runTest(UnconfinedTestDispatcher()) {
         val (c, remote, hw) = conversation(VoiceConfig(engine = VoiceEngine.API, providerName = "Google Gemini Live"), VoiceEngine.API)
         var handedOver: String? = null
-        c.onSessionFallback = { handedOver = it }
+        var why: String? = null
+        c.onSessionFallback = { id, reason -> handedOver = id; why = reason }
         c.begin("proj", keylessOnly = false, session = "s1")
         assertEquals("s1", remote.session)
         assertEquals("s1", c.ui.value.session)
@@ -332,8 +333,10 @@ class EngineSelectionTest {
         assertTrue(c.ui.value.bubbles.isEmpty())
         c.onEvent("voice.transcript", jsonOf("conversation" to "conv1", "role" to "user", "text" to "find the login bug", "final" to true))
         assertEquals("", c.ui.value.partial)
-        c.onEvent("voice.fallback", jsonOf("conversation" to "conv1", "reason" to "badKey", "speech" to "x"))
+        c.onEvent("voice.fallback", jsonOf("conversation" to "conv1", "reason" to "other", "speech" to "x",
+            "message" to "Google Gemini Live stopped working. It said: “Invalid argument”"))
         assertEquals("s1", handedOver)
+        assertEquals("Google Gemini Live stopped working. It said: “Invalid argument”", why)
         assertFalse(c.ui.value.active)
         assertTrue("end:conv1" in remote.calls)
         assertTrue(hw.first.spoken.isEmpty())
