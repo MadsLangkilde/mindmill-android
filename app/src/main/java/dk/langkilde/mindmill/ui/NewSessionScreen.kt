@@ -41,7 +41,8 @@ private val buildExamples = listOf(
  * Ask Mindmill: what it can do and some things to try. Nothing is made until the user writes or says something;
  * then `session.new` starts a session with it as the first message, in the mode's space and the phone's project, and
  * the session opens in place of this screen. In Plan it is an assistant session, which can do anything Mindmill can.
- * Talking live starts the session from the first thing said and keeps talking in it.
+ * Talking live starts the session from the first thing said and keeps talking in it: through the Mac's voice API
+ * (Gemini, OpenAI…) when it has one, else with the phone's own speech.
  */
 @Composable
 fun NewSessionScreen(nav: Nav, mode: Mode) {
@@ -51,7 +52,9 @@ fun NewSessionScreen(nav: Nav, mode: Mode) {
     val startLive = rememberLiveStarter()
     var starting by remember { mutableStateOf(false) }
     val brain = app.connection.hello?.brain ?: "Claude"
-    val liveHere = live.active && live.fromNew
+    val voiceUi by app.voice.ui.collectAsState()
+    val apiHere = (voiceUi.active || voiceUi.starting) && voiceUi.newSession != null && voiceUi.session == null
+    val liveHere = live.active && live.fromNew || apiHere
 
     LaunchedEffect(live.session, live.fromNew) {
         val id = live.session
@@ -59,6 +62,10 @@ fun NewSessionScreen(nav: Nav, mode: Mode) {
             app.liveChat.handedOver()
             nav.replace(Screen.SessionChat(id, "New session"))
         }
+    }
+    LaunchedEffect(voiceUi.session, voiceUi.newSession) {
+        val id = voiceUi.session
+        if (voiceUi.active && voiceUi.newSession != null && id != null) nav.replace(Screen.SessionChat(id, "New session"))
     }
 
     fun start(text: String) {
@@ -101,7 +108,9 @@ fun NewSessionScreen(nav: Nav, mode: Mode) {
             }
             if (starting) Loading(Modifier.padding(top = 12.dp), text = "Starting the session…")
         }
-        if (liveHere) {
+        if (apiHere) {
+            ApiLiveTurn(app.voice, voiceUi)
+        } else if (liveHere) {
             LiveTurn(app.liveChat, live)
         }
         Composer(
@@ -110,8 +119,8 @@ fun NewSessionScreen(nav: Nav, mode: Mode) {
             slash = SlashSource(null, app.currentScope),
             onSend = ::start,
             liveHere = liveHere,
-            onLive = { startLive { app.liveChat.startNew(mode.id, app.currentScope, assistant = mode == Mode.PLAN) } },
-            onEndLive = { app.liveChat.end() },
+            onLive = { startLive { app.startLiveNew(mode.id, app.currentScope, assistant = mode == Mode.PLAN) } },
+            onEndLive = { app.endLive() },
         )
     }
 }

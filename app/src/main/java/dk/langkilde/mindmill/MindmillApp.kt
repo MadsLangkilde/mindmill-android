@@ -25,6 +25,7 @@ import dk.langkilde.mindmill.remote.Scopes
 import dk.langkilde.mindmill.remote.SkillInfo
 import dk.langkilde.mindmill.remote.TestSources
 import dk.langkilde.mindmill.remote.TestTarget
+import dk.langkilde.mindmill.remote.bool
 import dk.langkilde.mindmill.remote.deliverTest
 import dk.langkilde.mindmill.remote.jsonOf
 import dk.langkilde.mindmill.remote.string
@@ -37,6 +38,7 @@ import dk.langkilde.mindmill.store.PrefsKeyValueStore
 import dk.langkilde.mindmill.voice.AndroidApiAudio
 import dk.langkilde.mindmill.voice.AndroidKeylessDevice
 import dk.langkilde.mindmill.voice.LiveChat
+import dk.langkilde.mindmill.voice.NewSessionSpec
 import dk.langkilde.mindmill.voice.VoiceConfig
 import dk.langkilde.mindmill.voice.VoiceApi
 import dk.langkilde.mindmill.voice.VoiceConversation
@@ -90,9 +92,16 @@ class ConfirmationBroker {
 
 private class RpcVoiceRemote(private val rpc: RpcChannel, private val loadConfig: suspend () -> VoiceConfig) : VoiceRemote {
     override suspend fun config() = loadConfig()
-    override suspend fun start(scope: String?, forceKeyless: Boolean, session: String?): Pair<String, VoiceEngine?> {
-        val r = rpc.call("voice.start", jsonOf("scope" to scope, "engine" to if (forceKeyless) "keyless" else null, "session" to session))
+    override suspend fun start(scope: String?, forceKeyless: Boolean, session: String?, newSession: NewSessionSpec?): Pair<String, VoiceEngine?> {
+        val r = rpc.call("voice.start", jsonOf(
+            "scope" to scope, "engine" to if (forceKeyless) "keyless" else null, "session" to session,
+            "newSession" to newSession?.let { jsonOf("space" to it.space, "assistant" to it.assistant) },
+        ))
         val conv = r.text("conversation") ?: throw RemoteException("failed", "The Mac didn't start a conversation.")
+        if (newSession != null && r.bool("newSession") != true) {
+            runCatching { rpc.call("voice.end", jsonOf("conversation" to conv)) }
+            throw RemoteException("unavailable", "Update Mindmill on the Mac to talk live with its voice API in a new chat.")
+        }
         return conv to VoiceEngine.from(r.string("engine"))
     }
     override suspend fun say(conversation: String, text: String) =
@@ -165,6 +174,10 @@ class MindmillApp : Application() {
         meeting = LiveMeeting(this, rpc, scope) { on -> micForMeeting = on; updateMic() }
         voice.onSessionFallback = { id, why ->
             liveChat.startInSession(id)
+            done(why, error = true)
+        }
+        voice.onNewSessionFallback = { spec, why ->
+            liveChat.startNew(spec.space, currentScope, spec.assistant)
             done(why, error = true)
         }
         deliveries = Deliveries(this, rpc, scope)
@@ -265,8 +278,26 @@ class MindmillApp : Application() {
 
     /** Ends live voice in a session, whichever kind runs. */
     fun endLive() {
-        if (voice.ui.value.session != null) voice.end()
+        if (voice.ui.value.session != null || voice.ui.value.newSession != null) voice.end()
         liveChat.end()
+    }
+
+    /**
+     * Talks live in a new chat ([space], Plan's [assistant] or Build): through the Mac's voice API when it has one, so
+     * the voice model starts the session with the first thing said and carries on in it; otherwise with the phone's
+     * own speech, which does the same.
+     */
+    fun startLiveNew(space: String, scopeId: String?, assistant: Boolean) {
+        scope.launch {
+            val config = runCatching { fetchVoiceConfig() }.getOrNull() ?: _voiceConfig.value
+            if (config?.engine == VoiceEngine.API && !settings.value.keylessOnly) {
+                voice.begin(scopeId, keylessOnly = false, newSession = NewSessionSpec(space, assistant))
+                if (voice.ui.value.active) return@launch
+                voice.ui.value.notice?.let { done("The voice API didn't start, so the phone's own voice is used: $it", error = true) }
+                voice.dismissNotice()
+            }
+            liveChat.startNew(space, scopeId, assistant)
+        }
     }
 
     /** Forgets a paired Mac; when it is the active one, the phone moves on to another or back to pairing. */

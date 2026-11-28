@@ -17,13 +17,17 @@ import kotlinx.serialization.json.JsonObject
 import java.util.Locale
 
 /** The Mac side of a conversation: `voice.*` methods. */
+/** A session live voice starts with the first thing the user asks (`voice.start` with `newSession`). */
+data class NewSessionSpec(val space: String, val assistant: Boolean)
+
 interface VoiceRemote {
     suspend fun config(): VoiceConfig
     /**
      * Returns the conversation id and the engine the Mac picked (null when it didn't say). With [session], live voice
-     * in that work session through the voice API (fails when the Mac has none).
+     * in that work session through the voice API (fails when the Mac has none); with [newSession], the same for a
+     * session the first request starts.
      */
-    suspend fun start(scope: String?, forceKeyless: Boolean, session: String? = null): Pair<String, VoiceEngine?>
+    suspend fun start(scope: String?, forceKeyless: Boolean, session: String? = null, newSession: NewSessionSpec? = null): Pair<String, VoiceEngine?>
     suspend fun say(conversation: String, text: String): String?
     suspend fun interrupt(conversation: String)
     suspend fun end(conversation: String)
@@ -93,6 +97,8 @@ data class VoiceUi(
     val paused: Boolean = false,
     /** Live voice in this work session: the voice API talks, the session works. */
     val session: String? = null,
+    /** Live voice for a new session: [session] is null until the first request starts it (`voice.session`). */
+    val newSession: NewSessionSpec? = null,
 )
 
 /**
@@ -121,6 +127,8 @@ class VoiceConversation(
 
     /** Live voice in a session lost its voice API: the app carries on with on-phone live chat in the session, and shows why. */
     var onSessionFallback: ((session: String, why: String) -> Unit)? = null
+    /** The same for live voice whose new session hadn't started yet: on-phone live chat starts it instead. */
+    var onNewSessionFallback: ((spec: NewSessionSpec, why: String) -> Unit)? = null
 
     val machine = KeylessVoiceMachine(object : KeylessEffects {
         override fun startListening() = device.startListening()
@@ -137,17 +145,17 @@ class VoiceConversation(
         device.events = this
     }
 
-    suspend fun begin(scopeId: String?, keylessOnly: Boolean, session: String? = null) {
+    suspend fun begin(scopeId: String?, keylessOnly: Boolean, session: String? = null, newSession: NewSessionSpec? = null) {
         if (_ui.value.active || _ui.value.starting) return
-        _ui.value = VoiceUi(starting = true, phase = "Starting…", session = session)
+        _ui.value = VoiceUi(starting = true, phase = "Starting…", session = session, newSession = newSession)
         try {
             config = remote.config()
-            val (conv, picked) = remote.start(scopeId, forceKeyless = keylessOnly, session = session)
+            val (conv, picked) = remote.start(scopeId, forceKeyless = keylessOnly, session = session, newSession = newSession)
             conversation = conv
             engine = if (keylessOnly) VoiceEngine.KEYLESS else picked ?: config.engine
             device.configure(config.rate, config.locale(), config.voice)
             device.begin()
-            _ui.value = VoiceUi(active = true, engine = engine, engineLabel = engineLabel(), conversation = conv, session = session)
+            _ui.value = VoiceUi(active = true, engine = engine, engineLabel = engineLabel(), conversation = conv, session = session, newSession = newSession)
             when (engine) {
                 VoiceEngine.API -> startApi(conv)
                 VoiceEngine.KEYLESS -> machine.start()
@@ -184,6 +192,7 @@ class VoiceConversation(
         val conv = conversation ?: return
         if (data.string("conversation").let { it != null && it != conv }) return
         when (name) {
+            "voice.session" -> data.text("session")?.let { id -> if (_ui.value.newSession != null) _ui.update { it.copy(session = id) } }
             "voice.sentence" -> {
                 val turn = data.text("turn") ?: return
                 val text = data.string("text") ?: return
@@ -282,6 +291,11 @@ class VoiceConversation(
         _ui.value.session?.let { id ->
             end()
             onSessionFallback?.invoke(id, notice)
+            return
+        }
+        _ui.value.newSession?.let { spec ->
+            end()
+            onNewSessionFallback?.invoke(spec, notice)
             return
         }
         if (engine == VoiceEngine.API) {

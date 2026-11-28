@@ -169,9 +169,10 @@ private class FakeRemote(var config: VoiceConfig, var engine: VoiceEngine?) : Vo
     val frames = mutableListOf<BinaryFrame>()
     var forced: Boolean? = null
     var session: String? = null
+    var newSession: NewSessionSpec? = null
     override suspend fun config() = config.also { calls += "config" }
-    override suspend fun start(scope: String?, forceKeyless: Boolean, session: String?): Pair<String, VoiceEngine?> {
-        calls += "start"; forced = forceKeyless; this.session = session
+    override suspend fun start(scope: String?, forceKeyless: Boolean, session: String?, newSession: NewSessionSpec?): Pair<String, VoiceEngine?> {
+        calls += "start"; forced = forceKeyless; this.session = session; this.newSession = newSession
         return "conv1" to engine
     }
     override suspend fun say(conversation: String, text: String): String { calls += "say:$conversation:$text"; return "t1" }
@@ -340,6 +341,30 @@ class EngineSelectionTest {
         assertFalse(c.ui.value.active)
         assertTrue("end:conv1" in remote.calls)
         assertTrue(hw.first.spoken.isEmpty())
+    }
+
+    @Test
+    fun liveVoiceInANewChatFollowsTheSessionItStartsOrHandsOverBeforeThat() = runTest(UnconfinedTestDispatcher()) {
+        val (c, remote, _) = conversation(VoiceConfig(engine = VoiceEngine.API, providerName = "Google Gemini Live"), VoiceEngine.API)
+        val spec = NewSessionSpec("plan", assistant = true)
+        c.begin("proj", keylessOnly = false, newSession = spec)
+        assertEquals(spec, remote.newSession)
+        assertEquals(spec, c.ui.value.newSession)
+        assertEquals(null, c.ui.value.session)
+        c.onEvent("voice.session", jsonOf("conversation" to "other", "session" to "s9"))
+        assertEquals(null, c.ui.value.session)
+        c.onEvent("voice.session", jsonOf("conversation" to "conv1", "session" to "s9"))
+        assertEquals("s9", c.ui.value.session)
+        assertTrue(c.ui.value.active)
+        c.end()
+
+        val (early, _, _) = conversation(VoiceConfig(engine = VoiceEngine.API), VoiceEngine.API)
+        var handedOver: Pair<NewSessionSpec, String>? = null
+        early.onNewSessionFallback = { s, why -> handedOver = s to why }
+        early.begin("proj", keylessOnly = false, newSession = spec)
+        early.onEvent("voice.fallback", jsonOf("conversation" to "conv1", "reason" to "network", "speech" to "x", "message" to "Lost it."))
+        assertEquals(spec to "Lost it.", handedOver)
+        assertFalse(early.ui.value.active)
     }
 
     @Test
